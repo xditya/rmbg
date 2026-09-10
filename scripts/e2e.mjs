@@ -21,7 +21,7 @@ import { chromium } from "playwright";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT ?? 3111);
 const BASE = `http://localhost:${PORT}`;
-const SHOTS = resolve(process.env.SHOTS ?? "/tmp/claude-0/-home-user/e1a5568c-5c08-52ea-b8d0-e39f6a721e19/scratchpad/shots");
+const SHOTS = resolve(process.env.SHOTS ?? resolve(ROOT, "e2e/screens"));
 const MODEL_TIMEOUT = Number(process.env.E2E_TIMEOUT_MS ?? 4 * 60 * 1000);
 
 const VIEWPORTS = [
