@@ -3,8 +3,10 @@ import { NextResponse, type NextRequest } from "next/server";
 /**
  * Security headers and a nonce-based Content Security Policy for every response.
  * The model runs in the browser: ONNX Runtime needs WebAssembly ('wasm-unsafe-eval') and blob
- * workers, and the weights are fetched from imgly's CDN, so those are the only holes in the
- * policy. No other origin is ever contacted.
+ * workers, it loads its own .wasm binary through fetch() from a blob: URL it minted itself
+ * (so connect-src needs blob:), the library's ndarray dependency needs 'unsafe-eval', and the
+ * weights are fetched from imgly's CDN. Those are the only holes in the policy. No other
+ * origin is ever contacted.
  */
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -21,11 +23,15 @@ export function proxy(request: NextRequest) {
 
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'${isDev ? " 'unsafe-inline' 'unsafe-eval'" : ""}`,
+    // 'unsafe-eval' because @imgly/background-removal depends on ndarray, which builds its typed
+    // view constructors with `new Function(...)` at runtime; without it every removal throws an
+    // EvalError. Scripts still have to carry the nonce to run at all ('strict-dynamic').
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval' 'unsafe-eval'${isDev ? " 'unsafe-inline'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    `connect-src 'self' ${MODEL_CDN}`,
+    // blob: because onnxruntime-web fetches its wasm binary from an in-page blob URL.
+    `connect-src 'self' blob: ${MODEL_CDN}`,
     "worker-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",
