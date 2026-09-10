@@ -1,0 +1,229 @@
+@import "tailwindcss";
+
+/* ---------- Design tokens ---------------------------------------------------
+   The engram / pastr palette: three greys, one restrained accent, hairlines instead of
+   shadows, Geist and Geist Mono. Light is the default; `.dark` on <html> switches
+   everything (set before paint by ThemeScript).
+---------------------------------------------------------------------------- */
+:root {
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #eceef1;
+  --border: #dde0e5;
+  --border-strong: #c7ccd4;
+  --fg: #15171a;
+  --fg-muted: #5c6370;
+  --fg-faint: #666d75;
+  --accent: #2e4fd6;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(46, 79, 214, 0.1);
+  --danger: #c2352b;
+  --success: #1f8a4c;
+  --warning: #b45309;
+  --selection: rgba(46, 79, 214, 0.18);
+  --ring: #2e4fd6;
+  --shadow: none;
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);
+  /* Checkerboard behind transparent pixels. */
+  --check-a: #e6e8ec;
+  --check-b: #ffffff;
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0f1114;
+  --surface: #171a1f;
+  --surface-2: #22262c;
+  --border: #272a30;
+  --border-strong: #363b44;
+  --fg: #edeff2;
+  --fg-muted: #a3a9b3;
+  --fg-faint: #828996;
+  --accent: #7b96ff;
+  --accent-fg: #0f1114;
+  --accent-soft: rgba(123, 150, 255, 0.14);
+  --danger: #e5574b;
+  --success: #4cc27a;
+  --warning: #e2a33b;
+  --selection: rgba(123, 150, 255, 0.28);
+  --ring: #7b96ff;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  --check-a: #1c2026;
+  --check-b: #22262c;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --shadow-pop: var(--shadow);
+  --ease-quint: var(--ease);
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------- Mobile app shell ------------------------------------------------ */
+:root {
+  --bar-h: calc(3.5rem + 1px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+}
+/* Room for a fixed bottom bar under the content. */
+@utility pb-bar {
+  padding-bottom: calc(var(--bar-h) + var(--safe-b));
+}
+/* Bottom padding that clears the home indicator on phones. */
+@utility pb-safe {
+  padding-bottom: max(1rem, var(--safe-b));
+}
+/* Side padding for fixed and top-layer surfaces, which body padding does not reach. */
+@utility px-inset {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+/* Transparent-pixel checkerboard, the classic way to show a cutout. */
+@utility bg-checker {
+  background-color: var(--check-b);
+  background-image: linear-gradient(45deg, var(--check-a) 25%, transparent 25%), linear-gradient(-45deg, var(--check-a) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--check-a) 75%), linear-gradient(-45deg, transparent 75%, var(--check-a) 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+}
+
+/* ---------- Base ------------------------------------------------------------ */
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+
+  ::selection {
+    background: var(--selection);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* iOS Safari zooms the page when a focused control is under 16px. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* ---------- Motion ----------------------------------------------------------
+   Transform and opacity only, ease-out, short. Entrances fade up 8px; nothing bounces.
+---------------------------------------------------------------------------- */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-fade-up {
+  animation: fade-up 240ms var(--ease) both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-fade-in {
+  animation: fade-in 200ms var(--ease) both;
+}
+
+/* Dialogs are bottom sheets on phones and slide up. */
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (max-width: 639.98px) {
+  dialog[open] {
+    animation: slide-up 260ms var(--ease) backwards;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
