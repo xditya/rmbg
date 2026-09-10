@@ -6,7 +6,7 @@
  */
 
 import type { Config } from "@imgly/background-removal";
-import { LIMITS } from "@/lib/config";
+import { LIMITS, MODEL_FILES } from "@/lib/config";
 
 /** Which backend ONNX Runtime ended up on. */
 export type Engine = "webgpu" | "wasm";
@@ -105,26 +105,59 @@ function dispatchProgress(key: string, current: number, total: number): void {
   for (const listener of listeners) listener(key, current, total);
 }
 
+/**
+ * Bumped after a failed init. The library memoises `initInference` by `JSON.stringify(config)`
+ * and caches the rejected promise too, so without a new key every retry after an offline first
+ * run would get the same rejection back without touching the network. A successful, resident
+ * session keeps its key.
+ */
+let attempt = 0;
+
 function libraryConfig(engine: Engine): Config {
   return {
     device: engine === "webgpu" ? "gpu" : "cpu",
     model: engine === "webgpu" ? "isnet_fp16" : "isnet_quint8",
+    // Only honoured on WebGPU: the library runs the WebAssembly session on the main thread, so
+    // on that path the page pauses for the length of the inference. The UI says so.
     proxyToWorker: true,
     output: { format: "image/png" },
     progress: dispatchProgress,
+    // Part of the memoise key (see `attempt`); fetch() ignores unknown options.
+    fetchArgs: { attempt },
   };
+}
+
+/** `lib.preload` that makes the next try a real one when this one fails. */
+async function initLibrary(lib: Library, config: Config): Promise<void> {
+  try {
+    await lib.preload(config);
+  } catch (error) {
+    attempt++;
+    throw error;
+  }
+}
+
+/**
+ * Whether an error is the network failing (offline, a CDN 5xx, a truncated chunk) rather than
+ * the backend: those must not send WebGPU machines to the WebAssembly fallback. The library
+ * wraps backend failures as "Failed to create session: ..." and raises fetch problems raw.
+ */
+function isTransferError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (/create session/i.test(msg)) return false;
+  return error instanceof TypeError || /Failed to fetch|Resource .*not found|Load failed|NetworkError/i.test(msg);
 }
 
 /**
  * Turns the library's raw `(key, current, total)` stream into our `Progress` events.
  *
  * Downloads arrive per file (`fetch:/models/isnet_fp16`, `fetch:/onnxruntime-web/...wasm`, ...),
- * each with its own total, so we keep the latest number per key and report the sum. The total
- * grows as new files show up, which is the honest thing to do since we only learn sizes lazily.
+ * one after another and each with its own total. The map is seeded with the engine's known
+ * file set so the total is right from the first event instead of growing as files show up
+ * (which made the bar hit 100% and drop back); anything unexpected is added when it appears.
  */
-function makeProgressMapper(onProgress?: (p: Progress) => void, onFirstCompute?: () => void): RawProgress {
-  const files = new Map<string, { loaded: number; total: number }>();
-  let computeSeen = false;
+function makeProgressMapper(engine: Engine, onProgress?: (p: Progress) => void): RawProgress {
+  const files = new Map(Object.entries(MODEL_FILES[engine]).map(([key, total]) => [`fetch:${key}`, { loaded: 0, total }]));
   return (key, current, total) => {
     if (key.startsWith("fetch:")) {
       files.set(key, { loaded: current, total });
@@ -138,10 +171,6 @@ function makeProgressMapper(onProgress?: (p: Progress) => void, onFirstCompute?:
       return;
     }
     if (key.startsWith("compute:")) {
-      if (!computeSeen) {
-        computeSeen = true;
-        onFirstCompute?.();
-      }
       onProgress?.(key === "compute:encode" ? { kind: "compose" } : { kind: "infer" });
     }
   };
@@ -156,7 +185,10 @@ function loadLibrary(): Promise<Library> {
 /** Settles like `work`, unless the signal fires first, in which case it rejects with AbortError. */
 function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work;
-  if (signal.aborted) return Promise.reject(abortError());
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(abortError());
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(abortError());
     signal.addEventListener("abort", onAbort, { once: true });
@@ -167,16 +199,16 @@ function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promis
 /** Fetches and warms the model so the first image doesn't pay for it. Safe to call many times. */
 export async function preloadModel(onProgress?: (p: Progress) => void): Promise<void> {
   const lib = await loadLibrary();
-  const raw = makeProgressMapper(onProgress);
+  const engine = await effectiveEngine();
+  const raw = makeProgressMapper(engine, onProgress);
   listeners.add(raw);
   try {
-    const engine = await effectiveEngine();
     try {
-      await lib.preload(libraryConfig(engine));
+      await initLibrary(lib, libraryConfig(engine));
     } catch (error) {
-      if (engine !== "webgpu") throw error;
+      if (engine !== "webgpu" || isTransferError(error)) throw error;
       rememberGpuFailure();
-      await lib.preload(libraryConfig("wasm"));
+      await initLibrary(lib, libraryConfig("wasm"));
     }
   } finally {
     listeners.delete(raw);
@@ -251,7 +283,10 @@ async function fit(file: Blob, maxEdge: number): Promise<{ blob: Blob; width: nu
   }
 }
 
-/** Reads pixel dimensions. Rejects with a friendly Error when the browser can't decode the format. */
+/**
+ * Reads pixel dimensions. Rejects with a friendly Error when the browser can't decode the format.
+ * The queue reads size from its thumbnail decode instead; kept for callers that only need this.
+ */
 export async function loadImageMeta(file: Blob): Promise<{ width: number; height: number }> {
   const bitmap = await decode(file);
   try {
@@ -261,7 +296,10 @@ export async function loadImageMeta(file: Blob): Promise<{ width: number; height
   }
 }
 
-/** Re-encodes to PNG when the longest edge exceeds maxEdge; returns the same Blob otherwise. */
+/**
+ * Re-encodes to PNG when the longest edge exceeds maxEdge; returns the same Blob otherwise.
+ * `removeBackground` does this itself, so only call it when the fitted Blob is needed on its own.
+ */
 export async function downscaleIfNeeded(file: Blob, maxEdge: number): Promise<Blob> {
   const { blob } = await fit(file, maxEdge);
   return blob;
@@ -291,7 +329,7 @@ export async function removeBackground(
   try {
     return await runOnce(lib, engine, input, opts);
   } catch (error) {
-    if (engine !== "webgpu" || signal?.aborted || isAbort(error)) throw error;
+    if (engine !== "webgpu" || signal?.aborted || isAbort(error) || isTransferError(error)) throw error;
     // WebGPU init or inference blew up: remember it and give WebAssembly one go on this image.
     rememberGpuFailure();
     return runOnce(lib, "wasm", input, opts);
@@ -310,26 +348,22 @@ async function runOnce(
 ): Promise<RemoveResult> {
   const signal = opts?.signal;
   const config = libraryConfig(engine);
-
-  // The timer measures inference + compose only. It starts at the first compute event; if the
-  // library skips straight to work (model already resident) we fall back to "after preload".
-  let started: number | undefined;
-  const raw = makeProgressMapper(opts?.onProgress, () => {
-    started ??= performance.now();
-  });
+  const raw = makeProgressMapper(engine, opts?.onProgress);
   listeners.add(raw);
   try {
-    await withAbort(lib.preload(config), signal);
-    const afterPreload = performance.now();
+    await withAbort(initLibrary(lib, config), signal);
 
     // The library cannot cancel a running job, so on abort we let it finish in the background and
     // simply refuse to hand the result over. The swallowed catch avoids an unhandled rejection.
+    // The clock starts after preload so the download is excluded and an abandoned job's leftover
+    // progress events (the listeners are shared) cannot inflate it.
+    const t0 = performance.now();
     const work = lib.removeBackground(input.blob, config);
     work.catch(() => {});
     const blob = await withAbort(work, signal);
     if (signal?.aborted) throw abortError();
 
-    const ms = performance.now() - (started ?? afterPreload);
+    const ms = performance.now() - t0;
     return { blob, width: input.width, height: input.height, ms, engine };
   } finally {
     listeners.delete(raw);

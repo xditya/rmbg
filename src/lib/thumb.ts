@@ -1,17 +1,31 @@
 "use client";
 
+export type Thumb = {
+  /** Object URL of a small WebP, or undefined when the thumbnail could not be encoded. The caller revokes it. */
+  url?: string;
+  /** Pixel size of the original, read from the same decode. */
+  width: number;
+  height: number;
+};
+
 /**
- * A small WebP thumbnail for queue rows and strips, so a big drop never decodes forty
- * originals at full size. Returns an object URL; the caller revokes it.
+ * One decode per photo: reads the pixel size and paints a small WebP for queue rows and
+ * strips, so a big drop never decodes forty originals at full size twice. Rejects only when
+ * the browser cannot decode the file at all (HEIC on Chrome, corrupt data).
  */
-export async function makeThumb(file: Blob, edge = 320): Promise<string> {
-  const bitmap = await createImageBitmap(file);
+export async function makeThumb(file: Blob, edge = 320): Promise<Thumb> {
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
   try {
-    const scale = Math.min(1, edge / Math.max(bitmap.width, bitmap.height));
-    const w = Math.max(1, Math.round(bitmap.width * scale));
-    const h = Math.max(1, Math.round(bitmap.height * scale));
-    const blob = await paint(bitmap, w, h);
-    return URL.createObjectURL(blob);
+    const { width, height } = bitmap;
+    const scale = Math.min(1, edge / Math.max(width, height));
+    const w = Math.max(1, Math.round(width * scale));
+    const h = Math.max(1, Math.round(height * scale));
+    try {
+      const blob = await paint(bitmap, w, h);
+      return { url: URL.createObjectURL(blob), width, height };
+    } catch {
+      return { width, height };
+    }
   } finally {
     bitmap.close();
   }

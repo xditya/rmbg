@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LIMITS } from "@/lib/config";
-import { downscaleIfNeeded, loadImageMeta, removeBackground, type Engine, type RemoveResult } from "@/lib/remove";
+import { removeBackground, type Engine, type RemoveResult } from "@/lib/remove";
 import { makeThumb } from "@/lib/thumb";
 import { formatBytes } from "@/lib/format";
 
@@ -35,12 +35,12 @@ export type Card = {
   leaving?: boolean;
 };
 
+/** `paused` is set by a model download failure and only lasts while that failed card is still in the queue. */
 type State = { cards: Card[]; selectedId: string | null; paused: boolean };
 
 type Action =
   | { type: "add"; cards: Card[] }
-  | { type: "meta"; id: string; width: number; height: number }
-  | { type: "thumb"; id: string; url: string }
+  | { type: "thumb"; id: string; url: string | undefined; width: number; height: number }
   | { type: "resultThumb"; id: string; url: string }
   | { type: "select"; id: string }
   | { type: "remove"; id: string }
@@ -67,14 +67,18 @@ function neighbour(cards: Card[], id: string): string | null {
   return next && next.id !== id ? next.id : null;
 }
 
+/** Whether the queue should stay paused: only while the card whose model download failed is still there. */
+function stillPaused(state: State, cards: Card[]): boolean {
+  return state.paused && cards.some((c) => c.state === "failed" && c.error === "model" && !c.leaving);
+}
+
 function reducer(state: State, a: Action): State {
   switch (a.type) {
     case "add":
-      return { ...state, cards: [...state.cards, ...a.cards], selectedId: state.selectedId ?? a.cards[0]?.id ?? null };
-    case "meta":
-      return { ...state, cards: patch(state.cards, a.id, (c) => ({ ...c, width: a.width, height: a.height })) };
+      // A fresh drop while paused is a retry: the new card triggers the download again.
+      return { ...state, paused: false, cards: [...state.cards, ...a.cards], selectedId: state.selectedId ?? a.cards[0]?.id ?? null };
     case "thumb":
-      return { ...state, cards: patch(state.cards, a.id, (c) => ({ ...c, thumbUrl: a.url })) };
+      return { ...state, cards: patch(state.cards, a.id, (c) => ({ ...c, thumbUrl: a.url ?? c.thumbUrl, width: a.width, height: a.height })) };
     case "resultThumb":
       return { ...state, cards: patch(state.cards, a.id, (c) => ({ ...c, resultThumbUrl: a.url })) };
     case "select":
@@ -82,12 +86,13 @@ function reducer(state: State, a: Action): State {
     case "remove": {
       if (!state.cards.some((c) => c.id === a.id && !c.leaving)) return state;
       const selectedId = state.selectedId === a.id ? neighbour(state.cards, a.id) : state.selectedId;
-      return { ...state, selectedId, cards: patch(state.cards, a.id, (c) => ({ ...c, leaving: true })) };
+      const cards = patch(state.cards, a.id, (c) => ({ ...c, leaving: true }));
+      return { ...state, selectedId, cards, paused: stillPaused(state, cards) };
     }
     case "dropped": {
       const cards = state.cards.filter((c) => c.id !== a.id);
       const selectedId = state.selectedId === a.id ? neighbour(state.cards, a.id) : state.selectedId;
-      return { ...state, cards, selectedId, paused: cards.length ? state.paused : false };
+      return { ...state, cards, selectedId, paused: stillPaused(state, cards) };
     }
     case "clear":
       return initial;
@@ -138,6 +143,13 @@ const EXIT_MS = 160;
 
 export type AddOutcome = { added: Card[]; rejected: { notImage: string[]; tooBig: string[]; overCap: number } };
 
+/**
+ * Anything the browser calls an image, plus files with no type at all (some file managers and
+ * apps hand those over). The decoder decides for real: what it cannot read (HEIC on Chrome,
+ * say) fails the card with the "format isn't supported" message instead of a wrong toast.
+ */
+const looksLikeImage = (f: File) => f.type.startsWith("image/") || f.type === "";
+
 export type QueueOptions = {
   /** Resolves once the model is loaded; rejects when the download fails. */
   ensureModel: () => Promise<void>;
@@ -161,11 +173,33 @@ export function useQueue(opts: QueueOptions) {
   const controllers = useRef(new Map<string, AbortController>());
   const running = useRef<string | null>(null);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  /** Cards added while a job was running; decoded once it settles so the work never lands on a busy main thread. */
+  const pending = useRef<Card[]>([]);
 
   useEffect(() => {
     stateRef.current = state;
     optsRef.current = opts;
   });
+
+  const inQueue = useCallback((id: string) => stateRef.current.cards.some((c) => c.id === id && !c.leaving), []);
+
+  // One decode per card: the thumbnail and the pixel size come from the same bitmap. A card
+  // the browser cannot decode fails here with the "format isn't supported" message.
+  const inspect = useCallback(
+    (card: Card) => {
+      makeThumb(card.file)
+        .then(({ url, width, height }) => {
+          if (inQueue(card.id)) dispatch({ type: "thumb", id: card.id, url, width, height });
+          else if (url) URL.revokeObjectURL(url);
+        })
+        .catch(() => {
+          if (!inQueue(card.id)) return;
+          dispatch({ type: "fail", id: card.id, error: "decode" });
+          optsRef.current.onFail?.(card, "decode");
+        });
+    },
+    [inQueue],
+  );
 
   const process = useCallback(async (card: Card) => {
     const ctrl = new AbortController();
@@ -188,9 +222,8 @@ export function useQueue(opts: QueueOptions) {
       }
       if (!alive()) return;
       dispatch({ type: "infer", id: card.id });
-      const blob = await downscaleIfNeeded(card.file, LIMITS.maxEdge);
-      if (!alive()) return;
-      const result = await removeBackground(blob, {
+      // The engine fits the photo to LIMITS.maxEdge itself and reports the size it used.
+      const result = await removeBackground(card.file, {
         signal: ctrl.signal,
         onProgress: (p) => {
           if (!alive()) return;
@@ -202,8 +235,9 @@ export function useQueue(opts: QueueOptions) {
       dispatch({ type: "done", id: card.id, result, url: URL.createObjectURL(result.blob) });
       optsRef.current.onDone?.(card, result);
       makeThumb(result.blob)
-        .then((url) => {
-          if (stateRef.current.cards.some((c) => c.id === card.id && !c.leaving)) dispatch({ type: "resultThumb", id: card.id, url });
+        .then(({ url }) => {
+          if (!url) return;
+          if (inQueue(card.id)) dispatch({ type: "resultThumb", id: card.id, url });
           else URL.revokeObjectURL(url);
         })
         .catch(() => {
@@ -220,19 +254,26 @@ export function useQueue(opts: QueueOptions) {
       running.current = null;
       setTick((t) => t + 1);
     }
-  }, []);
+  }, [inQueue]);
 
-  // The scheduler: whenever nothing is in flight, start the first queued card whose
-  // dimensions are known (decode failures never get this far). A card whose state says it
-  // is working counts as in flight even after its promise settled: React can render the
-  // `start` update on its own before the `done`/`fail` that followed it, and the ref alone
-  // would let a second job slip in during that intermediate render.
+  // The scheduler: whenever nothing is in flight, decode whatever arrived during the last job,
+  // then start the first queued card whose dimensions are known (decode failures never get
+  // this far). A card whose state says it is working counts as in flight even after its
+  // promise settled: React can render the `start` update on its own before the `done`/`fail`
+  // that followed it, and the ref alone would let a second job slip in during that
+  // intermediate render.
   useEffect(() => {
-    if (state.paused || running.current) return;
+    if (running.current) return;
+    if (pending.current.length) {
+      const batch = pending.current;
+      pending.current = [];
+      batch.forEach(inspect);
+    }
+    if (state.paused) return;
     if (state.cards.some((c) => c.state === "loading-model" || c.state === "removing")) return;
     const next = state.cards.find((c) => c.state === "queued" && !c.leaving && c.width !== undefined);
     if (next) void process(next);
-  }, [state.cards, state.paused, tick, process]);
+  }, [state.cards, state.paused, tick, process, inspect]);
 
   const add = useCallback((input: FileList | File[]): AddOutcome => {
     const files = Array.from(input);
@@ -240,7 +281,7 @@ export function useQueue(opts: QueueOptions) {
     const rejected = { notImage: [] as string[], tooBig: [] as string[], overCap: 0 };
     const accepted: File[] = [];
     for (const f of files) {
-      if (!(LIMITS.accept as readonly string[]).includes(f.type)) rejected.notImage.push(f.name);
+      if (!looksLikeImage(f)) rejected.notImage.push(f.name);
       else if (f.size > LIMITS.maxBytes) rejected.tooBig.push(f.name);
       else accepted.push(f);
     }
@@ -256,25 +297,11 @@ export function useQueue(opts: QueueOptions) {
       state: "queued",
     }));
     if (cards.length) dispatch({ type: "add", cards });
-    for (const card of cards) {
-      Promise.resolve()
-        .then(() => loadImageMeta(card.file))
-        .then((m) => dispatch({ type: "meta", id: card.id, width: m.width, height: m.height }))
-        .catch(() => {
-          dispatch({ type: "fail", id: card.id, error: "decode" });
-          optsRef.current.onFail?.(card, "decode");
-        });
-      makeThumb(card.file)
-        .then((url) => {
-          if (stateRef.current.cards.some((c) => c.id === card.id)) dispatch({ type: "thumb", id: card.id, url });
-          else URL.revokeObjectURL(url);
-        })
-        .catch(() => {
-          /* rows fall back to the original */
-        });
-    }
+    // On WebAssembly the inference holds the main thread, so decodes wait for the job to settle.
+    if (running.current) pending.current.push(...cards);
+    else cards.forEach(inspect);
     return { added: cards, rejected };
-  }, []);
+  }, [inspect]);
 
   const select = useCallback((id: string) => dispatch({ type: "select", id }), []);
 
@@ -288,7 +315,8 @@ export function useQueue(opts: QueueOptions) {
       id,
       setTimeout(() => {
         timers.current.delete(id);
-        revoke(card);
+        // The card as rendered now, not the click-time snapshot: a result or thumb that landed since is revoked too.
+        revoke(stateRef.current.cards.find((c) => c.id === id) ?? card);
         dispatch({ type: "dropped", id });
       }, EXIT_MS),
     );
@@ -299,6 +327,7 @@ export function useQueue(opts: QueueOptions) {
     controllers.current.clear();
     for (const t of timers.current.values()) clearTimeout(t);
     timers.current.clear();
+    pending.current = [];
     stateRef.current.cards.forEach(revoke);
     dispatch({ type: "clear" });
   }, []);
@@ -329,7 +358,10 @@ export function useQueue(opts: QueueOptions) {
     };
   }, [cards]);
 
-  return { cards, selectedId: state.selectedId, selected, counts, paused: state.paused, add, select, remove, clear, retry };
+  /** The card whose model download failed, while it keeps the queue paused. */
+  const modelFailed = useMemo(() => (state.paused ? (cards.find((c) => c.state === "failed" && c.error === "model" && !c.leaving) ?? null) : null), [cards, state.paused]);
+
+  return { cards, selectedId: state.selectedId, selected, counts, paused: state.paused, modelFailed, add, select, remove, clear, retry };
 }
 
 export type QueueHandle = ReturnType<typeof useQueue>;
