@@ -11,5 +11,7 @@ export const LIMITS = {
   maxBytes: 25 * 1024 * 1024,
   /** Longest edge we feed the model; the cutout is scaled back to the original size. */
   maxEdge: 4096,
+  /** Most files one drop can add; the rest are skipped with a toast. */
+  maxFiles: 30,
   accept: ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/avif"],
 } as const;
