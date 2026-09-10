@@ -23,6 +23,9 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
     const el = ref.current;
     if (!el) return;
     if (open && !el.open) {
+      // A swipe-dismiss leaves the sheet translated off screen; the element is reused, so reset it.
+      el.style.transform = "";
+      el.style.transition = "";
       el.showModal();
       el.querySelector<HTMLElement>("[autofocus], [data-autofocus]")?.focus();
     }
@@ -57,7 +60,11 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
     if (d.dy > SWIPE_CLOSE) {
       el.style.transition = "transform 160ms ease-in";
       el.style.transform = "translateY(100%)";
-      setTimeout(onClose, 150);
+      setTimeout(() => {
+        onClose();
+        el.style.transform = "";
+        el.style.transition = "";
+      }, 150);
       return;
     }
     el.style.transition = "transform 200ms var(--ease)";

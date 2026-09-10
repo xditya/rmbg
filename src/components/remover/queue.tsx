@@ -46,11 +46,12 @@ function Thumb({ card, className }: { card: Card; className?: string }) {
   );
 }
 
-function Glyph({ card }: { card: Card }) {
-  if (card.state === "done") return <Check className="size-4 text-success" aria-hidden />;
-  if (card.state === "failed") return <CircleAlert className="size-4 text-danger" aria-hidden />;
-  if (card.state === "loading-model" || card.state === "removing") return <LoaderCircle className="size-4 animate-spin text-fg-faint" aria-hidden />;
-  return <span className="block size-4" aria-hidden />;
+/** The state as a shape as well as a colour: a tick, an alert, a spinner. Nothing while queued. */
+function Glyph({ card, size = "size-4" }: { card: Card; size?: string }) {
+  if (card.state === "done") return <Check className={cn(size, "text-success")} aria-hidden />;
+  if (card.state === "failed") return <CircleAlert className={cn(size, "text-danger")} aria-hidden />;
+  if (card.state === "loading-model" || card.state === "removing") return <LoaderCircle className={cn(size, "animate-spin text-fg-faint")} aria-hidden />;
+  return <span className={cn("block", size)} aria-hidden />;
 }
 
 function header(cards: Card[]): string {
@@ -72,6 +73,7 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
   if (layout === "strip") {
     return (
       <div className={cn("flex items-center gap-2 overflow-x-auto snap-x", className)} role="group" aria-label="Queue">
+        {/* The exit relies on plain opacity/transform, so the entrance animation is dropped once a card leaves. */}
         {cards.map((card) => (
           <button
             key={card.id}
@@ -82,18 +84,17 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
             onClick={() => onSelect(card.id)}
             style={stagger(card)}
             className={cn(
-              "relative size-16 shrink-0 snap-start overflow-hidden rounded-md ring-1 ring-border transition-[opacity,transform] duration-150 ease-quint animate-fade-up sm:size-20",
+              "relative size-16 shrink-0 snap-start overflow-hidden rounded-md ring-1 ring-border transition-[opacity,transform] duration-150 ease-quint sm:size-20",
+              !card.leaving && "animate-fade-up",
               "aria-[current=true]:ring-2 aria-[current=true]:ring-accent data-[leaving]:-translate-y-1 data-[leaving]:opacity-0",
             )}
           >
             <Thumb card={card} className="absolute inset-0" />
-            <span
-              aria-hidden
-              className={cn(
-                "absolute bottom-1 right-1 size-2.5 rounded-full ring-2 ring-surface",
-                card.state === "done" ? "bg-success" : card.state === "failed" ? "bg-danger" : card.state === "queued" ? "bg-fg-faint" : "bg-accent",
-              )}
-            />
+            {card.state !== "queued" && (
+              <span aria-hidden className="absolute bottom-1 right-1 flex size-5 items-center justify-center rounded-full bg-surface ring-1 ring-border">
+                <Glyph card={card} size="size-3" />
+              </span>
+            )}
           </button>
         ))}
         <button
@@ -104,9 +105,12 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
         >
           <Plus className="size-4" aria-hidden />
         </button>
-        <Button size="sm" variant="ghost" onClick={onClearAll} className="ml-1 hidden shrink-0 sm:inline-flex">
-          Clear all
-        </Button>
+        {/* Phones have Clear all in the More sheet; a wrapper hides it here because the Button's own display class would win. */}
+        <span className="ml-1 hidden shrink-0 sm:contents">
+          <Button size="sm" variant="ghost" onClick={onClearAll}>
+            Clear all
+          </Button>
+        </span>
       </div>
     );
   }
@@ -128,7 +132,7 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
               key={card.id}
               data-leaving={card.leaving || undefined}
               style={stagger(card)}
-              className="group relative animate-fade-up transition-[opacity,transform] duration-150 ease-quint data-[leaving]:-translate-y-1 data-[leaving]:opacity-0"
+              className={cn("group relative transition-[opacity,transform] duration-150 ease-quint data-[leaving]:-translate-y-1 data-[leaving]:opacity-0", !card.leaving && "animate-fade-up")}
             >
               <button
                 type="button"
@@ -139,7 +143,7 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
                 <Thumb card={card} className="relative size-10 rounded-sm" />
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate text-[13px]">{card.name}</span>
-                  <span className="truncate font-mono text-[12px] text-fg-faint">{meta(card, waiting)}</span>
+                  <span className="truncate font-mono text-[12px] text-fg-muted">{meta(card, waiting)}</span>
                 </span>
                 <Glyph card={card} />
               </button>

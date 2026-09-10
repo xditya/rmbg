@@ -6,9 +6,19 @@ export function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** "25 MB": whole megabytes, for limits quoted in copy. */
+export function formatWholeMB(n: number): string {
+  return `${Math.round(n / (1024 * 1024))} MB`;
+}
+
 /** "2,400 × 1,600" */
 export function formatDims(w: number, h: number): string {
   return `${w.toLocaleString("en-US")} × ${h.toLocaleString("en-US")}`;
+}
+
+/** "4,096 px" */
+export function formatPx(n: number): string {
+  return `${n.toLocaleString("en-US")} px`;
 }
 
 /** "1.8 s" under ten seconds, "12 s" after that. */
@@ -17,9 +27,18 @@ export function formatMs(ms: number): string {
   return s < 10 ? `${s.toFixed(1)} s` : `${Math.round(s)} s`;
 }
 
-/** "photo.jpg" → "photo-rmbg.png" */
+/**
+ * "photo.jpg" → "photo-rmbg.png". The stem is used as a download and share file name, so path
+ * separators, control characters and other characters file systems refuse become dashes, and
+ * very long names are cut.
+ */
 export function resultName(name: string): string {
-  const stem = name.replace(/\.[^.]+$/, "").trim() || "photo";
+  const stem =
+    name
+      .replace(/\.[^.]+$/, "")
+      .replace(/[\\/:*?"<>|\x00-\x1f]+/g, "-")
+      .replace(/^[.\s-]+|[.\s-]+$/g, "")
+      .slice(0, 120) || "photo";
   return `${stem}-rmbg.png`;
 }
 

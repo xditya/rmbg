@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, type RefObject } from "react";
 
 export type Hotkey = {
   /** e.g. "mod+s", "mod+enter", "escape", "mod+shift+c" — mod = ⌘ on macOS, Ctrl elsewhere */
@@ -25,12 +25,23 @@ function matches(e: KeyboardEvent, combo: string): boolean {
   return k === key;
 }
 
-export function useHotkeys(hotkeys: Hotkey[]) {
+export type HotkeyOptions = {
+  /**
+   * Only fire while focus is inside this element. Bare single-character shortcuts must be
+   * scoped to a component to pass WCAG 2.1.4, so the tool root is focusable and clicks inside
+   * it keep focus there.
+   */
+  within?: RefObject<HTMLElement | null>;
+};
+
+export function useHotkeys(hotkeys: Hotkey[], options: HotkeyOptions = {}) {
+  const { within } = options;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.isComposing) return;
       const target = e.target as HTMLElement | null;
       if (target?.closest?.("dialog[open]")) return;
+      if (within && !(target && within.current?.contains(target))) return;
       const typing = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
       for (const h of hotkeys) {
         if (!h.combo.includes("+") && (e.ctrlKey || e.metaKey || e.altKey)) continue;
@@ -44,7 +55,7 @@ export function useHotkeys(hotkeys: Hotkey[]) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [hotkeys]);
+  }, [hotkeys, within]);
 }
 
 export function isMac(): boolean {

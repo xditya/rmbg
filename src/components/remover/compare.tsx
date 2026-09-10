@@ -67,7 +67,8 @@ export function Compare({
     if (!dragging) return;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     start(false);
-    onChange(Math.round(pending.current));
+    // Unrounded, so the handle stays exactly where the finger left it; ARIA gets whole numbers.
+    onChange(pending.current);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -83,9 +84,11 @@ export function Compare({
     onChange(clamp(next));
   };
 
+  // Vertical touch pans go to the browser (the page scrolls; we get pointercancel), so only
+  // the handle itself refuses them: a drag that starts there is never interrupted.
   return (
     <div
-      className="absolute inset-0 cursor-ew-resize touch-none"
+      className="absolute inset-0 cursor-ew-resize touch-pan-y"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -97,12 +100,12 @@ export function Compare({
         aria-label="Compare original and result"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={value}
-        aria-valuetext={`${value}% original`}
+        aria-valuenow={Math.round(value)}
+        aria-valuetext={`${Math.round(value)}% original`}
         aria-orientation="horizontal"
         data-dragging={dragging || undefined}
         onKeyDown={onKeyDown}
-        className="group/handle absolute inset-y-0 w-11 -translate-x-1/2 rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--ring)]"
+        className="group/handle absolute inset-y-0 w-11 -translate-x-1/2 touch-none rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--ring)]"
         style={{ left: "var(--x, 50%)" }}
       >
         <div aria-hidden className="mx-auto h-full w-0.5 bg-white outline outline-1 outline-black/25" />

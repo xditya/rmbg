@@ -6,7 +6,8 @@ import { cardStatus } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
 import type { Engine } from "@/lib/remove";
 import { backdropColor, blurRadius, type BackdropChoice } from "@/lib/backdrop";
-import { formatDims, formatMB, formatMs } from "@/lib/format";
+import { LIMITS, modelDownloadNote } from "@/lib/config";
+import { formatDims, formatMB, formatMs, formatPx } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { Compare } from "./compare";
 import { ModelProgress } from "./model-progress";
@@ -15,7 +16,7 @@ import type { View } from "./view-switch";
 export type Download = { loaded: number; total: number };
 
 const ENGINE_LABEL: Record<Engine, string> = { webgpu: "WebGPU", wasm: "WebAssembly" };
-const DOWNSCALE_NOTE = "Photos over 4,096 px on the long side are scaled down before the cut.";
+const DOWNSCALE_NOTE = `Photos over ${formatPx(LIMITS.maxEdge)} on the long side are scaled down before the cut.`;
 
 /** The view that can actually be shown: anything but the original needs a finished cutout. */
 export function effectiveView(card: Card | null, view: View): View {
@@ -36,6 +37,7 @@ export function Stage({
   compare,
   onCompare,
   waitingForModel,
+  firstRun,
   className,
 }: {
   card: Card;
@@ -47,6 +49,8 @@ export function Stage({
   compare: number;
   onCompare: (v: number) => void;
   waitingForModel: boolean;
+  /** Whether this download is the first one (the note about caching is shown). */
+  firstRun: boolean;
   className?: string;
 }) {
   const area = useRef<HTMLDivElement>(null);
@@ -56,6 +60,11 @@ export function Stage({
 
   const v = effectiveView(card, view);
   const done = v !== "original";
+  // The view we came from: Compare -> Result keeps the clip while the original fades out, so
+  // the right half never flashes the full original before the cross-fade.
+  const [views, setViews] = useState({ prev: v, cur: v });
+  if (views.cur !== v) setViews({ prev: views.cur, cur: v });
+  const clipped = v === "compare" || (v === "result" && views.prev === "compare");
   const color = backdropColor(backdrop);
   const rw = card.resultWidth ?? card.width ?? 1;
   const blurPx = rect ? (blurRadius(rw, card.resultHeight ?? card.height ?? 1) * rect.width) / rw : 0;
@@ -113,7 +122,7 @@ export function Stage({
                 alt={card.name}
                 draggable={false}
                 className={cn("absolute inset-0 size-full object-contain transition-opacity duration-200 ease-quint", v === "result" ? "opacity-0" : "opacity-100")}
-                style={v === "compare" ? { clipPath: "inset(0 calc(100% - var(--x, 50%)) 0 0)" } : undefined}
+                style={clipped ? { clipPath: "inset(0 calc(100% - var(--x, 50%)) 0 0)" } : undefined}
               />
               {v === "compare" && (
                 <>
@@ -133,7 +142,7 @@ export function Stage({
         </div>
       </div>
       <div className="hidden h-8 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 font-mono text-[12px] text-fg-faint sm:flex">
-        <StatusLine card={card} engine={engine} download={download} waitingForModel={waitingForModel} withName />
+        <StatusLine card={card} engine={engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} withName />
       </div>
     </div>
   );
@@ -144,7 +153,7 @@ function Pill({ side, children }: { side: "left" | "right"; children: string }) 
     <span
       aria-hidden
       className={cn(
-        "pointer-events-none absolute bottom-2 rounded bg-bg/80 px-1.5 py-0.5 font-mono text-[11px] text-fg-muted backdrop-blur transition-opacity duration-200 ease-quint group-data-[dragging]/frame:opacity-0 group-data-[dragging]/frame:duration-150",
+        "pointer-events-none absolute bottom-2 rounded bg-bg/80 px-1.5 py-0.5 font-mono text-[11px] text-fg backdrop-blur transition-opacity duration-200 ease-quint group-data-[dragging]/frame:opacity-0 group-data-[dragging]/frame:duration-150",
         side === "left" ? "left-2" : "right-2",
       )}
     >
@@ -162,12 +171,14 @@ export function StatusLine({
   engine,
   download,
   waitingForModel,
+  firstRun,
   withName,
 }: {
   card: Card;
   engine: Engine | null;
   download: Download | null;
   waitingForModel: boolean;
+  firstRun?: boolean;
   withName?: boolean;
 }) {
   const label = ENGINE_LABEL[card.engine ?? engine ?? "wasm"];
@@ -177,11 +188,13 @@ export function StatusLine({
   let title: string | undefined;
   switch (card.state) {
     case "loading-model":
-      left = "downloading model";
-      right = download && download.total > 0 ? formatMB(download.loaded, download.total) : "about 40 MB";
+      // The first-run note lives here, where the row already has the room, so nothing shifts.
+      left = firstRun ? (withName ? "downloading model · first run, cached after this" : "downloading model · first run") : "downloading model";
+      right = download && download.total > 0 ? formatMB(download.loaded, download.total) : modelDownloadNote(known);
       break;
     case "removing":
-      left = "removing background…";
+      // Without WebGPU the library runs the model on the main thread, so the page really does pause.
+      left = known === "wasm" ? "removing… the page may pause for a few seconds" : "removing background…";
       right = withName ? card.name : "";
       break;
     case "queued":

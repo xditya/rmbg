@@ -186,8 +186,9 @@
     transform: none;
   }
 }
+/* `backwards`, not `both`: the end frame is the natural state, and a held `opacity: 1` would beat the exit classes. */
 .animate-fade-up {
-  animation: fade-up 240ms var(--ease) both;
+  animation: fade-up 240ms var(--ease) backwards;
 }
 
 @keyframes fade-in {
@@ -199,7 +200,7 @@
   }
 }
 .animate-fade-in {
-  animation: fade-in 200ms var(--ease) both;
+  animation: fade-in 200ms var(--ease) backwards;
 }
 
 /* Dialogs are bottom sheets on phones and slide up. */
@@ -237,7 +238,9 @@
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     animation-delay: 0ms !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

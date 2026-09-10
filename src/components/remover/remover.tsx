@@ -9,7 +9,7 @@ import { useClientFact, useMedia } from "@/hooks/use-media";
 import { useQueue } from "@/hooks/use-queue";
 import { TRANSPARENT, type BackdropChoice } from "@/lib/backdrop";
 import { LIMITS, SITE } from "@/lib/config";
-import { formatBytes, formatDims, formatMs } from "@/lib/format";
+import { formatBytes, formatDims, formatMs, formatWholeMB } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { ActionButtons, PhoneBar, useActions } from "./action-bar";
 import { BackgroundPicker } from "./background-picker";
@@ -22,7 +22,10 @@ import { effectiveView, Stage, StatusLine } from "./stage";
 import { ViewSwitch, type View } from "./view-switch";
 
 const DEFAULT_TITLE = `${SITE.name} — ${SITE.tagline}`;
-const FIRST_RUN = "First run downloads the model (about 40 MB). It is cached after that.";
+const SIZE_LIMIT = formatWholeMB(LIMITS.maxBytes);
+
+/** How long an announcement stays in the live region; same-batch ones each get their own node. */
+const ANNOUNCE_MS = 2000;
 
 const isTyping = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
 
@@ -37,20 +40,25 @@ export function Remover() {
   const pickRef = useRef<HTMLInputElement>(null);
   const snapRef = useRef<HTMLInputElement>(null);
   const viewChosen = useRef(false);
+  /** How the person last interacted; decides whether focus is moved for them. */
+  const modality = useRef<"pointer" | "keyboard">("pointer");
 
   const [view, setView] = useState<View>("original");
   const [backdrop, setBackdrop] = useState<BackdropChoice>(TRANSPARENT);
   const [compare, setCompare] = useState(50);
   const [depth, setDepth] = useState(0);
   const [more, setMore] = useState(false);
-  const [live, setLive] = useState({ n: 0, text: "" });
+  const [live, setLive] = useState<{ n: number; text: string; at: number }[]>([]);
   const [reveal, setReveal] = useState<string | null>(null);
   const [firstRunShown, setFirstRunShown] = useState(false);
 
   const coarse = useMedia("(pointer: coarse)");
   const mac = useClientFact(isMac, false);
 
-  const announce = useCallback((text: string) => setLive((l) => ({ n: l.n + 1, text })), []);
+  const announce = useCallback((text: string) => {
+    const at = Date.now();
+    setLive((l) => [...l.filter((x) => at - x.at < ANNOUNCE_MS), { n: (l[l.length - 1]?.n ?? 0) + 1, text, at }]);
+  }, []);
 
   const engine = useEngine({
     onDownload: (phase) => announce(phase === "start" ? "Downloading the model" : "Model downloaded"),
@@ -71,9 +79,10 @@ export function Remover() {
     },
     onFail: (card) => announce(`Couldn't remove the background from ${card.name}`),
   });
-  const { cards, selected, selectedId, counts, add, select, remove, clear, retry } = queue;
+  const { cards, selected, selectedId, counts, modelFailed, add, select, remove, clear, retry } = queue;
   const liveCards = useMemo(() => cards.filter((c) => !c.leaving), [cards]);
-  const multi = liveCards.length >= 2;
+  // Leaving cards still count here so the queue stays mounted while their exit plays.
+  const multi = cards.length >= 2;
   const empty = liveCards.length === 0;
 
   const intent = useCallback(() => {
@@ -88,9 +97,9 @@ export function Remover() {
       const { added, rejected } = add(files);
       const n = rejected.notImage.length + rejected.tooBig.length;
       if (n === 1) {
-        push("error", rejected.notImage.length ? "That file isn't an image. PNG, JPEG, WebP, GIF, BMP and AVIF work." : `${rejected.tooBig[0]} is larger than 25 MB, the limit.`);
+        push("error", rejected.notImage.length ? "That file isn't an image. PNG, JPEG, WebP, GIF, BMP and AVIF work." : `${rejected.tooBig[0]} is larger than ${SIZE_LIMIT}, the limit.`);
       } else if (n > 1) {
-        push("error", `${n} files were skipped. Only images under 25 MB work.`);
+        push("error", `${n} files were skipped. Only images under ${SIZE_LIMIT} work.`);
       }
       if (rejected.overCap > 0) push("info", `Added the first ${LIMITS.maxFiles}. Drop the rest after.`);
       if (added.length === 1) announce(`Added ${added[0].name}`);
@@ -137,6 +146,20 @@ export function Remover() {
   );
 
   const actions = useActions(selected, backdrop);
+
+  // Input modality, tracked once so focus is only moved for keyboard users.
+  useEffect(() => {
+    const onPointer = () => (modality.current = "pointer");
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) modality.current = "keyboard";
+    };
+    window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, []);
 
   // Document-level drag and paste. Depth counting keeps the overlay honest over nested nodes.
   useEffect(() => {
@@ -191,6 +214,8 @@ export function Remover() {
     };
   }, [addFiles, intent, push]);
 
+  // Bare keys only fire while focus is inside the tool (the root is focusable, so a click on
+  // the stage keeps it there); the destructive pair needs the modifier.
   const hotkeys = useMemo<Hotkey[]>(
     () => [
       { combo: "d", handler: () => void actions.download() },
@@ -201,12 +226,12 @@ export function Remover() {
       { combo: "3", handler: () => chooseView("compare") },
       { combo: "[", handler: () => step(-1) },
       { combo: "]", handler: () => step(1) },
-      { combo: "backspace", handler: () => selectedId && removeCard(selectedId) },
-      { combo: "delete", handler: () => selectedId && removeCard(selectedId) },
+      { combo: "mod+backspace", handler: () => selectedId && removeCard(selectedId) },
+      { combo: "mod+delete", handler: () => selectedId && removeCard(selectedId) },
     ],
     [actions, openPicker, chooseView, step, selectedId, removeCard],
   );
-  useHotkeys(hotkeys);
+  useHotkeys(hotkeys, { within: root });
 
   // The tab title follows the queue, on transitions only.
   useEffect(() => {
@@ -217,42 +242,47 @@ export function Remover() {
     };
   }, [counts]);
 
-  // The first-run line waits 300ms so cached weights never flash it.
+  // The first-run note waits 300ms so cached weights never flash it.
   const loadingSelected = selected?.state === "loading-model";
   useEffect(() => {
     if (!loadingSelected || firstRunShown) return;
     const t = setTimeout(() => setFirstRunShown(true), 300);
     return () => clearTimeout(t);
   }, [loadingSelected, firstRunShown]);
-  const firstRunLine = firstRunShown && loadingSelected && !engine.ready;
+  const firstRun = firstRunShown && loadingSelected && !engine.ready;
+
+  // Adding the first photo unmounts the hero, and with it whatever was focused. Keyboard and
+  // screen-reader users land on the view switch instead of the top of the document.
+  useEffect(() => {
+    if (empty) return;
+    const active = document.activeElement;
+    if (modality.current !== "keyboard" && active !== document.body && active !== null) return;
+    root.current?.querySelector<HTMLElement>('[role="radiogroup"][aria-label="View"] [aria-checked="true"]')?.focus();
+  }, [empty]);
 
   // After the reveal, keyboard users land on the slider; pointer users are left alone.
   useEffect(() => {
-    if (!reveal || reveal !== selectedId) return;
-    const active = document.activeElement;
-    let keyboard = false;
-    try {
-      keyboard = active instanceof HTMLElement && active.matches(":focus-visible");
-    } catch {
-      keyboard = false;
-    }
-    if (keyboard) root.current?.querySelector<HTMLElement>('[role="slider"]')?.focus();
+    if (!reveal || reveal !== selectedId || modality.current !== "keyboard") return;
+    root.current?.querySelector<HTMLElement>('[role="slider"]')?.focus();
   }, [reveal, selectedId]);
 
   const shownView = effectiveView(selected, view);
   const done = selected?.state === "done";
   const download = selected?.progress ?? engine.download;
   const waitingForModel = !!selected && selected.state === "queued" && counts.loading;
+  const removeHint = mac ? "⌘ Backspace" : "Ctrl Backspace";
+  // The selected card's own error, else the model failure that is holding the whole queue.
+  const notice = selected?.state === "failed" ? selected : modelFailed;
 
   return (
-    <div ref={root} className={cn("relative flex flex-1 flex-col", !empty && "max-sm:pb-bar lg:flex-row lg:gap-4")}>
+    <div ref={root} tabIndex={-1} className={cn("relative flex flex-1 flex-col outline-none", !empty && "lg:flex-row lg:gap-4")}>
       <input
         ref={pickRef}
         id="pick"
         type="file"
         multiple
         accept={LIMITS.accept.join(",")}
-        aria-label="Choose a photo"
+        aria-hidden
         tabIndex={-1}
         className="sr-only"
         onChange={(e) => {
@@ -266,7 +296,7 @@ export function Remover() {
         type="file"
         accept="image/*"
         capture="environment"
-        aria-label="Take a photo"
+        aria-hidden
         tabIndex={-1}
         className="sr-only"
         onChange={(e) => {
@@ -275,11 +305,13 @@ export function Remover() {
         }}
       />
       <div aria-live="polite" className="sr-only">
-        <span key={live.n}>{live.text}</span>
+        {live.map((l) => (
+          <span key={l.n}>{l.text}</span>
+        ))}
       </div>
 
       {empty || !selected ? (
-        <Dropzone over={depth > 0} coarse={coarse} mac={mac} onPick={openPicker} onSnap={openCamera} onIntent={intent} />
+        <Dropzone over={depth > 0} coarse={coarse} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} />
       ) : (
         <>
           <div className="flex min-w-0 flex-1 flex-col animate-fade-in">
@@ -292,12 +324,12 @@ export function Remover() {
               compare={compare}
               onCompare={setCompare}
               waitingForModel={waitingForModel}
+              firstRun={firstRun}
             />
             <div className="flex h-8 items-center gap-3 px-4 font-mono text-[12px] text-fg-faint sm:hidden">
-              <StatusLine card={selected} engine={engine.engine} download={download} waitingForModel={waitingForModel} />
+              <StatusLine card={selected} engine={engine.engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} />
             </div>
-            {firstRunLine && <p className="text-[12.5px] text-fg-muted max-sm:px-4 max-sm:pb-2 sm:mt-2">{FIRST_RUN}</p>}
-            {selected.state === "failed" && <Notice card={selected} onRetry={() => retry(selected.id)} onRemove={() => removeCard(selected.id)} className="max-sm:mx-4 max-sm:my-2 sm:mt-2" />}
+            {notice && <Notice card={notice} onRetry={() => retry(notice.id)} onRemove={() => removeCard(notice.id)} className="max-sm:mx-4 max-sm:my-2 sm:mt-2" />}
 
             {/* Phone and tablet controls; the desktop column has its own. */}
             <div className="flex flex-col gap-3 px-4 py-3 sm:mt-3 sm:flex-row sm:flex-wrap sm:items-center sm:px-0 sm:py-0 lg:hidden">
@@ -312,6 +344,9 @@ export function Remover() {
               />
               <div className="hidden sm:contents">
                 <ActionButtons actions={actions} layout="row" onDoAnother={openPicker} />
+                <Button variant="danger" className="border-transparent bg-transparent" aria-label={`Remove ${selected.name}`} title={`Remove (${removeHint})`} onClick={() => removeCard(selected.id)}>
+                  Remove
+                </Button>
               </div>
             </div>
             {multi && (
@@ -323,7 +358,7 @@ export function Remover() {
                 onAdd={openPicker}
                 onClearAll={clearAll}
                 layout="strip"
-                className="animate-fade-in px-4 pb-3 sm:mt-3 sm:px-0 sm:pb-0 lg:hidden"
+                className="animate-fade-in px-4 pb-3 pt-0.5 scroll-px-4 sm:mt-3 sm:px-0 sm:pb-0.5 sm:scroll-px-0 lg:hidden"
               />
             )}
           </div>
@@ -347,7 +382,7 @@ export function Remover() {
               <Queue cards={cards} selectedId={selectedId} onSelect={select} onRemove={removeCard} onAdd={openPicker} onClearAll={clearAll} layout="list" className="animate-fade-in" />
             )}
             <div className="mt-auto px-4 py-2">
-              <Button variant="danger" size="sm" className="w-full border-transparent bg-transparent" title="Remove (Backspace)" onClick={() => removeCard(selected.id)}>
+              <Button variant="danger" size="sm" className="w-full border-transparent bg-transparent" title={`Remove (${removeHint})`} onClick={() => removeCard(selected.id)}>
                 Remove this photo
               </Button>
             </div>

@@ -2,9 +2,13 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, CircleAlert, Info, X } from "lucide-react";
+import { IconButton } from "./button";
 
 type ToastKind = "success" | "error" | "info";
-type Toast = { id: number; kind: ToastKind; message: string };
+type Toast = { id: number; kind: ToastKind; message: string; leaving?: boolean };
+
+/** How long a dismissed toast keeps its node so the exit can play. */
+const EXIT_MS = 150;
 
 const ToastContext = createContext<{ push: (kind: ToastKind, message: string) => void } | null>(null);
 
@@ -14,10 +18,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
 
   const dismiss = useCallback((id: number) => {
-    setToasts((t) => t.filter((x) => x.id !== id));
     const timer = timers.current.get(id);
     if (timer) clearTimeout(timer);
-    timers.current.delete(id);
+    // Mark it leaving so it fades out, then drop it.
+    setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x)));
+    timers.current.set(
+      id,
+      setTimeout(() => {
+        timers.current.delete(id);
+        setToasts((t) => t.filter((x) => x.id !== id));
+      }, EXIT_MS),
+    );
   }, []);
 
   const push = useCallback(
@@ -47,20 +58,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div
             key={t.id}
             role="status"
-            className="animate-fade-up pointer-events-auto flex max-w-md items-center gap-2.5 rounded-lg border border-border bg-surface px-3.5 py-2.5 text-[13px] shadow-pop"
+            data-leaving={t.leaving || undefined}
+            className="animate-fade-up pointer-events-auto flex max-w-md items-center gap-2.5 rounded-lg border border-border bg-surface px-3.5 py-2.5 text-[13px] shadow-pop transition-[opacity,transform] duration-150 ease-quint data-[leaving]:translate-y-1 data-[leaving]:opacity-0"
           >
             {t.kind === "success" && <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden />}
             {t.kind === "error" && <CircleAlert className="size-4 shrink-0 text-danger" aria-hidden />}
             {t.kind === "info" && <Info className="size-4 shrink-0 text-fg-muted" aria-hidden />}
             <span className="min-w-0 break-words">{t.message}</span>
-            <button
-              type="button"
-              onClick={() => dismiss(t.id)}
-              aria-label="Dismiss"
-              className="ml-1 rounded p-0.5 text-fg-faint hover:text-fg"
-            >
+            <IconButton size="sm" label="Dismiss" onClick={() => dismiss(t.id)} className="-my-1.5 -mr-1.5 ml-0.5 text-fg-faint">
               <X className="size-3.5" />
-            </button>
+            </IconButton>
           </div>
         ))}
       </div>

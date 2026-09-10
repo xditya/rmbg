@@ -5,7 +5,8 @@ import type { KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Logo } from "@/components/logo";
-import { SITE } from "@/lib/config";
+import { modelDownloadNote, SITE } from "@/lib/config";
+import type { Engine } from "@/lib/remove";
 import { cn } from "@/lib/cn";
 
 /**
@@ -16,6 +17,7 @@ export function Dropzone({
   over,
   coarse,
   mac,
+  engine,
   onPick,
   onSnap,
   onIntent,
@@ -23,6 +25,8 @@ export function Dropzone({
   over: boolean;
   coarse: boolean;
   mac: boolean;
+  /** Decides the size quoted for the first download; null until detection finishes. */
+  engine: Engine | null;
   onPick: () => void;
   onSnap: () => void;
   /** First sign the person means it: warms the model. */
@@ -58,7 +62,7 @@ export function Dropzone({
             </Button>
           )}
         </div>
-        <p className="relative mt-4 h-5 w-full text-[12.5px] text-fg-faint">
+        <p className={cn("relative mt-4 h-5 w-full text-[12.5px]", over ? "text-fg-muted" : "text-fg-faint")}>
           <span className={cn("absolute inset-x-0 whitespace-nowrap transition-opacity duration-150 ease-quint", over ? "opacity-0" : "opacity-100")}>
             <span className="sm:hidden">several at once is fine</span>
             <span className="hidden sm:inline">
@@ -69,7 +73,7 @@ export function Dropzone({
             drop it
           </span>
         </p>
-        <p className="mt-6 font-mono text-[12px] text-fg-faint">First run downloads the model (about 40 MB). It is cached after that.</p>
+        <p className={cn("mt-6 font-mono text-[12px]", over ? "text-fg-muted" : "text-fg-faint")}>First run downloads the model ({modelDownloadNote(engine)}). It is cached after that.</p>
       </div>
     </section>
   );

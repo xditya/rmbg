@@ -18,12 +18,12 @@ export function Notice({ card, onRetry, onRemove, className }: { card: Card; onR
       <p className="min-w-0 flex-1 text-fg">{MESSAGES[error]}</p>
       <div className="flex shrink-0 gap-1.5">
         {error !== "decode" && (
-          <Button size="sm" onClick={onRetry}>
+          <Button size="sm" className="[@media(pointer:coarse)]:h-11" onClick={onRetry}>
             Try again
           </Button>
         )}
         {error !== "model" && (
-          <Button size="sm" variant="ghost" onClick={onRemove}>
+          <Button size="sm" variant="ghost" className="[@media(pointer:coarse)]:h-11" onClick={onRemove}>
             Remove
           </Button>
         )}

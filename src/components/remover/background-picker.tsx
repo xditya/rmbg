@@ -6,7 +6,8 @@ import type { BackdropChoice } from "@/lib/backdrop";
 
 type Kind = BackdropChoice["kind"];
 
-const SIZES = { md: "size-8", lg: "size-11", auto: "size-11 sm:size-8" } as const;
+/** `auto`: desktop size, tall on phones and on any touch screen (a 768px iPad is still a finger). */
+const SIZES = { md: "size-8", lg: "size-11", auto: "size-8 max-sm:size-11 [@media(pointer:coarse)]:size-11" } as const;
 
 const LABELS: Record<Kind, string> = { transparent: "Transparent", white: "White", black: "Black", custom: "Custom colour", blur: "Blurred original" };
 const ORDER: Kind[] = ["transparent", "white", "black", "custom", "blur"];
@@ -128,11 +129,11 @@ export function BackgroundPicker({
                 ref={colorRef}
                 type="color"
                 defaultValue="#888888"
-                aria-label={LABELS[kind]}
+                aria-hidden
                 tabIndex={-1}
                 disabled={disabled}
                 onInput={(e) => onColorInput(e.currentTarget.value)}
-                className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-not-allowed"
+                className="absolute inset-0 size-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
               />
             </span>
           );

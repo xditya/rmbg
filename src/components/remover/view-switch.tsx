@@ -48,7 +48,7 @@ export function ViewSwitch({
       role="radiogroup"
       aria-label="View"
       onKeyDown={onKeyDown}
-      className={cn("relative grid h-8 grid-cols-3 rounded-md border border-border bg-surface p-0.5 max-sm:h-11", className)}
+      className={cn("relative grid h-8 grid-cols-3 rounded-md border border-border bg-surface p-0.5 max-sm:h-11 [@media(pointer:coarse)]:h-11", className)}
     >
       <div
         aria-hidden
