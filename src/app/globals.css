@@ -219,11 +219,25 @@
   }
 }
 
+/* Indeterminate progress: a third-width segment sweeping along the bar. */
+@keyframes slide-x {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.animate-slide-x {
+  animation: slide-x 1.2s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
     transition-duration: 0.01ms !important;
   }
 }
