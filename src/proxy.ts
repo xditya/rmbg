@@ -1,8 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
- * Security headers and a nonce-based Content Security Policy for every response.
- * The model runs in the browser: ONNX Runtime needs WebAssembly ('wasm-unsafe-eval') and blob
+ * Security headers and a nonce-based Content Security Policy for every page response.
+ * The model runs in the browser: ONNX Runtime needs WebAssembly ('wasm-unsafe-eval'), on
+ * WebGPU it spawns a same-origin module worker (served from /_next/static/media; that file's
+ * own policy is set in next.config.ts since this proxy skips static assets) plus blob: thread
  * workers, it loads its own .wasm binary through fetch() from a blob: URL it minted itself
  * (so connect-src needs blob:), the library's ndarray dependency needs 'unsafe-eval', and the
  * weights are fetched from imgly's CDN. Those are the only holes in the policy. No other
