@@ -10,9 +10,29 @@ import type { NextConfig } from "next";
  */
 const WORKER_CSP = ["default-src 'none'", "script-src 'self' blob: 'wasm-unsafe-eval'", "connect-src 'self' blob:", "worker-src 'self' blob:"].join("; ");
 
+/**
+ * The API runs the model with onnxruntime-node and sharp: native modules, left out of the
+ * bundle and loaded from node_modules at runtime. The tracer follows the `require` to the
+ * linux/x64 binding (it resolves the platform on the build machine, so the darwin and win32
+ * excludes below are belt and braces) but cannot see the shared library the binding dlopens
+ * next to itself, so that one file is added by hand: without it every cold start on Vercel
+ * fails inside `import "onnxruntime-node"`. Only the one file, not the directory: it also
+ * holds a byte-identical versioned copy and, if the package's postinstall ever runs, the
+ * CUDA providers.
+ */
+const ORT_LIB = "bin/napi-v3/linux/x64/libonnxruntime.so.1";
+const ORT_LINUX_LIB = [`./node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node/${ORT_LIB}`, `./node_modules/onnxruntime-node/${ORT_LIB}`];
+const ORT_FOREIGN_BINARIES = ["darwin", "win32"].flatMap((os) => [
+  `./node_modules/onnxruntime-node/bin/napi-v3/${os}/**`,
+  `./node_modules/.pnpm/onnxruntime-node*/node_modules/onnxruntime-node/bin/napi-v3/${os}/**`,
+]);
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  serverExternalPackages: ["onnxruntime-node", "sharp"],
+  outputFileTracingIncludes: { "/api/v1/remove": ORT_LINUX_LIB },
+  outputFileTracingExcludes: { "/api/v1/remove": ORT_FOREIGN_BINARIES },
   async headers() {
     return [
       {

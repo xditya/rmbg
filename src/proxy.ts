@@ -52,6 +52,11 @@ export function proxy(request: NextRequest) {
   return response;
 }
 
+/**
+ * The API is left out: its routes set their own no-store, nosniff and referrer headers, a page
+ * CSP means nothing on an image or JSON response, and Next tees every body it proxies through
+ * a size-capped clone, which would buffer an upload twice and cut it at that cap.
+ */
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png|icons/|robots.txt|manifest.webmanifest|opengraph-image|twitter-image).*)"],
+  matcher: ["/((?!api/|_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png|icons/|robots.txt|manifest.webmanifest|opengraph-image|twitter-image).*)"],
 };
