@@ -48,3 +48,6 @@ PLAN.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# e2e screenshots
+/e2e/screens/

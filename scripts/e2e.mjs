@@ -12,6 +12,7 @@
  * resolves from PLAYWRIGHT_BROWSERS_PATH.
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,7 +60,10 @@ async function ensureServer() {
     return;
   }
   console.log(`info starting next start on :${PORT}`);
-  server = spawn("pnpm", ["start", "-p", String(PORT)], { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"] });
+  // Run Next's bin directly under this node: killing the child then really stops the server.
+  // Going through `pnpm start` leaves an orphaned next-server holding the port after cleanup.
+  const nextBin = createRequire(import.meta.url).resolve("next/dist/bin/next");
+  server = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"] });
   for (let i = 0; i < 120; i++) {
     if (await isUp()) return;
     if (server.exitCode !== null) throw new Error(`server exited with ${server.exitCode}`);
