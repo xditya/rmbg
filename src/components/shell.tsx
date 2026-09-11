@@ -33,7 +33,7 @@ export function Shell({
             <Logo className="size-5" />
             <span>{SITE.name}</span>
           </Link>
-          <nav className="ml-1 hidden items-center gap-0.5 sm:flex" aria-label="Primary">
+          <nav className="ml-1 flex items-center gap-0.5" aria-label="Primary">
             <Link href="/docs" className="rounded-md px-2 py-1 text-[13.5px] font-medium text-fg-muted transition-colors hover:text-fg">
               api
             </Link>

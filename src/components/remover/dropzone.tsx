@@ -3,6 +3,7 @@
 import { Camera, ImagePlus } from "lucide-react";
 import type { KeyboardEvent, RefObject } from "react";
 import { Button } from "@/components/ui/button";
+import Link from "next/link";
 import { Kbd } from "@/components/ui/kbd";
 import { Logo } from "@/components/logo";
 import { modelDownloadNote, SITE } from "@/lib/config";
@@ -79,6 +80,13 @@ export function Dropzone({
           </span>
         </p>
         <p className={cn("mt-6 font-mono text-[12px]", over ? "text-fg-muted" : "text-fg-faint")}>First run downloads the model ({modelDownloadNote(engine)}). It is cached after that.</p>
+        <p className={cn("mt-2 font-mono text-[12px]", over ? "text-fg-muted" : "text-fg-faint")}>
+          Scripting it? There is an{" "}
+          <Link href="/docs" className="text-fg-muted underline decoration-border-strong underline-offset-2 transition-colors hover:text-fg hover:decoration-fg">
+            API
+          </Link>
+          .
+        </p>
       </div>
     </section>
   );
