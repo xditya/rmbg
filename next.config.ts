@@ -29,6 +29,9 @@ const ORT_LINUX_LIB = [`./node_modules/.pnpm/onnxruntime-node@*/node_modules/onn
 const ORT_FOREIGN_BINARIES = ["darwin", "win32"].map((os) => `./node_modules/.pnpm/onnxruntime-node*/node_modules/onnxruntime-node/bin/napi-v3/${os}/**`);
 
 const nextConfig: NextConfig = {
+  // The e2e script builds into its own directory (NEXT_DIST_DIR=.next-e2e) with the weights URL
+  // pointed at its local mirror, so `.next`, what `pnpm start` and a deploy serve, keeps the CDN.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   reactStrictMode: true,
   poweredByHeader: false,
   serverExternalPackages: ["onnxruntime-node", "sharp"],
