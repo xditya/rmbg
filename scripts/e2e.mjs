@@ -4,27 +4,31 @@
  * (WebAssembly in headless Chromium) to check the cutout has a transparent border and an
  * opaque subject, exercises the engine picker (the two radios in More on the phone layout,
  * their touch targets, the desktop control after a reload, `?engine=wasm`), the `canRedo`
- * decision behind "Redo this photo" and the mask judge behind the WebGPU self-check, checks the headers of the
- * frame the page runs WebGPU in, screenshots the docs page, and exercises the HTTP API
+ * decision behind "Redo this photo" and the mask judge behind the WebGPU self-check, the model
+ * cache (the service worker, its Cache Storage bucket, the picker's badges, a photo finished
+ * with the weights origin blocked), the colour picker, the crash guard and the decode path
+ * (a 3000x2000 photo fitted to 2,048 px, a JPEG with EXIF rotation), checks the headers of
+ * the frame the page runs WebGPU in, screenshots the docs page, and exercises the HTTP API
  * (POST /api/v1/remove, GET /api/v1/info) against the same server. The 429 check needs the
  * default rate limit, so it spawns one extra short-lived server on PORT + 1 with the limiter
  * at its default.
  *
- *   pnpm build && pnpm e2e
+ *   pnpm e2e
  *
  * Environment: PORT (default 3111), SHOTS (screenshot directory), E2E_TIMEOUT_MS (model wait,
  * default 4 minutes), HTTPS_PROXY (forwarded to Chromium so the model CDN is reachable behind
- * an egress proxy), E2E_CDN_CACHE (where the weights are kept between runs, see `cacheCdn`;
- * `0` turns the cache off), E2E_WEBGPU=1 (turns on Chromium's software WebGPU adapter:
- * detection must still pick WebAssembly, since it has no shader-f16, and a page whose adapter
- * is made to claim the feature must be caught by the self-check and fall back). Never runs
- * `playwright install`: it uses whatever Chromium Playwright resolves from
+ * an egress proxy), E2E_CDN_CACHE (where the weights are kept between runs, see `startMirror`;
+ * `0` turns the cache and the mirror off), E2E_WEBGPU=1 (turns on Chromium's software WebGPU
+ * adapter: detection must still pick WebAssembly, since it has no shader-f16, and a page whose
+ * adapter is made to claim the feature must be caught by the self-check and fall back). Never
+ * runs `playwright install`: it uses whatever Chromium Playwright resolves from
  * PLAYWRIGHT_BROWSERS_PATH.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,9 +44,22 @@ const LIMIT_PORT = PORT + 1;
 const LIMIT_BASE = `http://localhost:${LIMIT_PORT}`;
 const SHOTS = resolve(process.env.SHOTS ?? resolve(ROOT, "e2e/screens"));
 const MODEL_TIMEOUT = Number(process.env.E2E_TIMEOUT_MS ?? 4 * 60 * 1000);
+/**
+ * The build this script makes and serves. Its own directory: the weights URL is inlined at
+ * build time and points at the mirror here, so building into `.next` would leave `pnpm start`
+ * and a deploy with a mirror that is gone (and a CSP that blocks the CDN).
+ */
+const DIST = process.env.NEXT_DIST_DIR || ".next-e2e";
 /** The library's default publicPath: where the weights and the runtime come from. */
 const CDN = "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/";
 const CDN_CACHE = process.env.E2E_CDN_CACHE === "0" ? null : resolve(process.env.E2E_CDN_CACHE ?? resolve(tmpdir(), "rmbg-e2e-cdn"));
+/** The local mirror of the CDN (see `startMirror`), and the base URL the app is built and started with. */
+const MIRROR_PORT = PORT + 2;
+const MODEL_BASE = CDN_CACHE ? `http://127.0.0.1:${MIRROR_PORT}/` : CDN;
+/** The Cache Storage bucket the service worker keeps the chunks in (public/sw.js). */
+const MODEL_CACHE = "rmbg-models-v1";
+/** The long edge the crash guard fits photos to (LOW_MEMORY_EDGE in src/lib/config.ts). */
+const LOW_MEMORY_EDGE = 2048;
 
 const VIEWPORTS = [
   { name: "phone", width: 390, height: 844 },
@@ -72,13 +89,59 @@ async function isUp(base = BASE) {
   }
 }
 
+// Run Next's bin directly under this node: killing the child then really stops the server.
+// Going through `pnpm start` leaves an orphaned next-server holding the port after cleanup.
+const nextBin = createRequire(import.meta.url).resolve("next/dist/bin/next");
+
+/** Whether a file under `dir` contains `text`: the build carries the weights URL as a literal. */
+function treeHas(dir, text) {
+  if (!existsSync(dir)) return false;
+  for (const name of readdirSync(dir)) {
+    const path = resolve(dir, name);
+    if (statSync(path).isDirectory()) {
+      if (treeHas(path, text)) return true;
+    } else if (/\.js$/.test(name) && readFileSync(path, "utf8").includes(text)) return true;
+  }
+  return false;
+}
+
+/** The newest mtime under `dir`, for the staleness check. */
+function newest(path) {
+  if (!existsSync(path)) return 0;
+  const st = statSync(path);
+  if (!st.isDirectory()) return st.mtimeMs;
+  let t = 0;
+  for (const name of readdirSync(path)) t = Math.max(t, newest(resolve(path, name)));
+  return t;
+}
+
+/**
+ * The weights URL is inlined at build time (NEXT_PUBLIC_MODEL_URL), so the build in `DIST` must
+ * carry the one this run uses: the mirror's, or the CDN's without the cache. Rebuilds when it
+ * does not, or when a source file is newer than the build. `next build` rewrites next-env.d.ts
+ * and tsconfig.json to point at its dist directory; both are put back, so the tree stays clean
+ * and `pnpm typecheck` keeps reading `.next`.
+ */
+async function ensureBuild() {
+  const built = existsSync(resolve(ROOT, DIST, "BUILD_ID")) ? statSync(resolve(ROOT, DIST, "BUILD_ID")).mtimeMs : 0;
+  const sources = Math.max(...["src", "public", "next.config.ts", "package.json"].map((f) => newest(resolve(ROOT, f))));
+  if (treeHas(resolve(ROOT, DIST, "static/chunks"), MODEL_BASE) && built > sources) return;
+  console.log(`info building ${DIST} with NEXT_PUBLIC_MODEL_URL=${MODEL_BASE}${built > sources ? "" : " (the source is newer than the build)"}`);
+  const t0 = Date.now();
+  const kept = ["next-env.d.ts", "tsconfig.json"].map((name) => resolve(ROOT, name)).filter((file) => existsSync(file)).map((file) => [file, readFileSync(file, "utf8")]);
+  const code = await new Promise((done) => {
+    const child = spawn(process.execPath, [nextBin, "build"], { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], env: { ...process.env, NEXT_PUBLIC_MODEL_URL: MODEL_BASE, NEXT_DIST_DIR: DIST } });
+    child.on("exit", done);
+  });
+  for (const [file, before] of kept) if (readFileSync(file, "utf8") !== before) writeFileSync(file, before);
+  if (code !== 0) throw new Error(`next build exited with ${code}`);
+  console.log(`info built in ${Math.round((Date.now() - t0) / 1000)}s`);
+}
+
 /** Boots `next start` on `port` with the given extra environment and waits for it. */
 async function startServer(port, env) {
   console.log(`info starting next start on :${port}`);
-  // Run Next's bin directly under this node: killing the child then really stops the server.
-  // Going through `pnpm start` leaves an orphaned next-server holding the port after cleanup.
-  const nextBin = createRequire(import.meta.url).resolve("next/dist/bin/next");
-  const child = spawn(process.execPath, [nextBin, "start", "-p", String(port)], { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], env });
+  const child = spawn(process.execPath, [nextBin, "start", "-p", String(port)], { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], env: { ...env, NEXT_PUBLIC_MODEL_URL: MODEL_BASE, NEXT_DIST_DIR: DIST } });
   const base = `http://localhost:${port}`;
   for (let i = 0; i < 120; i++) {
     if (await isUp(base)) return child;
@@ -93,12 +156,98 @@ let server = null;
 let limitServer = null;
 async function ensureServer() {
   if (await isUp()) {
-    console.log(`info reusing server on ${BASE} (its rate limit is whatever it was started with)`);
+    console.log(`info reusing server on ${BASE} (its rate limit is whatever it was started with; it must serve a build made with NEXT_PUBLIC_MODEL_URL=${MODEL_BASE})`);
     return;
   }
+  await ensureBuild();
   // A high limit for the functional checks; the 429 check gets its own server with the default.
   server = await startServer(PORT, { ...process.env, RATE_LIMIT_PER_MIN: "1000" });
 }
+
+/* ---------------------------------------------------------------- mirror */
+
+const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+const isChunk = (name) => /^[0-9a-f]{64}$/.test(name);
+
+/** The mirror while it runs: its server, its counters, and `blocked`, which makes it answer 503 to everything. */
+let mirror = null;
+
+/**
+ * The model CDN, mirrored on 127.0.0.1 from a cache on disk between runs. Every context is a
+ * fresh profile with an empty HTTP cache and no service worker, so without this each of the
+ * half-dozen contexts that run the model would fetch the weights again (55 MB on WebAssembly,
+ * 111 MB more on the spoofed WebGPU pass), which is what made the runs time out on a slow
+ * link. Earlier runs served the on-disk chunks through Playwright's request interception;
+ * that only sees requests the page makes, and the service worker's own fetches (the ones that
+ * fill its cache) go straight to the network, so the mirror is what both of them reach. The
+ * chunks are content-addressed (the file name is the sha256 of the bytes), so a cached chunk
+ * is only served when it still checks out and a fetched one is only kept when it does;
+ * resources.json is fetched from the CDN once per run (the disk copy is the fallback). CORS
+ * is open, as on the CDN: the page and the worker fetch cross-origin.
+ */
+async function startMirror() {
+  if (!CDN_CACHE) return null;
+  mkdirSync(CDN_CACHE, { recursive: true });
+  const stats = { hits: 0, misses: 0, blockedChunks: 0, blockedManifests: 0 };
+  const cors = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" };
+  const manifestFile = resolve(CDN_CACHE, "resources.json");
+  let manifest = null;
+  const server = createServer(async (req, res) => {
+    const name = new URL(req.url, MODEL_BASE).pathname.slice(1);
+    const answer = (status, body = null, type = "application/octet-stream") => {
+      res.writeHead(status, body ? { ...cors, "Content-Type": type, "Content-Length": body.length } : cors);
+      res.end(body ?? undefined);
+    };
+    if (req.method !== "GET") return answer(405);
+    if (mirror?.blocked) {
+      if (isChunk(name)) stats.blockedChunks++;
+      else stats.blockedManifests++;
+      return answer(503);
+    }
+    try {
+      if (name === "resources.json") {
+        if (!manifest) {
+          try {
+            const r = await fetch(`${CDN}resources.json`);
+            if (r.ok) {
+              manifest = Buffer.from(await r.arrayBuffer());
+              writeFileSync(manifestFile, manifest);
+            }
+          } catch {}
+          manifest ??= existsSync(manifestFile) ? readFileSync(manifestFile) : null;
+        }
+        return manifest ? answer(200, manifest, "application/json") : answer(502);
+      }
+      if (!isChunk(name)) return answer(404);
+      const file = resolve(CDN_CACHE, name);
+      let body = existsSync(file) ? readFileSync(file) : null;
+      if (body && sha256(body) === name) stats.hits++;
+      else {
+        const r = await fetch(`${CDN}${name}`);
+        if (!r.ok) return answer(r.status);
+        body = Buffer.from(await r.arrayBuffer());
+        if (sha256(body) !== name) return answer(502);
+        writeFileSync(file, body);
+        stats.misses++;
+      }
+      return answer(200, body);
+    } catch (e) {
+      console.log(`info mirror: ${name.slice(0, 12)} failed (${String(e).split("\n")[0]})`);
+      return answer(502);
+    }
+  });
+  await new Promise((ready) => server.listen(MIRROR_PORT, "127.0.0.1", ready));
+  console.log(`info model mirror on ${MODEL_BASE} from ${CDN_CACHE}`);
+  return { server, stats, blocked: false };
+}
+
+/** The chunk URLs an engine's files are made of, from the manifest the app reads (through the mirror when there is one). */
+async function chunkUrls(keys) {
+  const manifest = await (await fetch(`${MODEL_BASE}resources.json`)).json();
+  return keys.flatMap((key) => (manifest[key]?.chunks ?? []).map((c) => `${MODEL_BASE}${c.name}`));
+}
+
+const WASM_FILES = ["/models/isnet_quint8", "/onnxruntime-web/ort-wasm-simd-threaded.wasm", "/onnxruntime-web/ort-wasm-simd-threaded.mjs"];
 
 /* --------------------------------------------------------------- browser */
 
@@ -148,52 +297,7 @@ async function newContext(browser, { width, height, theme, touch = false }) {
       localStorage.setItem("theme", t);
     } catch {}
   }, theme);
-  await cacheCdn(ctx);
   return ctx;
-}
-
-const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
-const isChunk = (name) => /^[0-9a-f]{64}$/.test(name);
-const cdnStats = { hits: 0, misses: 0 };
-
-/**
- * The model CDN, cached on disk between runs. Every context is a fresh profile with an empty
- * HTTP cache, so without this each of the half-dozen contexts that run the model would fetch
- * the weights again (55 MB on WebAssembly, 111 MB more on the spoofed WebGPU pass), which is
- * what made the runs time out on a slow link. The chunks are content-addressed (the file name
- * is the sha256 of the bytes), so a cached chunk is only served when it still checks out and
- * a fetched one is only kept when it does; resources.json is always fetched live. The
- * requests still go through Chromium's own network stack (and proxy) on a miss.
- */
-async function cacheCdn(ctx) {
-  if (!CDN_CACHE) return;
-  mkdirSync(CDN_CACHE, { recursive: true });
-  await ctx.route(`${CDN}**`, async (route) => {
-    const name = route.request().url().slice(CDN.length).split("?")[0];
-    const file = resolve(CDN_CACHE, name);
-    try {
-      if (isChunk(name) && existsSync(file)) {
-        const body = readFileSync(file);
-        if (sha256(body) === name) {
-          cdnStats.hits++;
-          return await route.fulfill({ status: 200, contentType: "application/octet-stream", body });
-        }
-      }
-      // No timeout of our own: a 4 MB chunk can take minutes on a slow link, and the page has its own.
-      const response = await route.fetch({ timeout: 0 });
-      const body = await response.body();
-      if (response.ok() && isChunk(name) && sha256(body) === name) {
-        cdnStats.misses++;
-        writeFileSync(file, body);
-      }
-      return await route.fulfill({ response, body });
-    } catch (e) {
-      // The page went away mid-fetch (a navigation, a closed context), or the fetch failed: hand the
-      // request back to the browser, which reports it the way it would without the cache.
-      await route.continue().catch(() => {});
-      if (!/aborted|closed|Target page/i.test(String(e))) console.log(`info cdn cache: ${name.slice(0, 12)} not cached (${String(e).split("\n")[0]})`);
-    }
-  });
 }
 
 const problems = [];
@@ -398,18 +502,30 @@ const enginePicker = (page) =>
     const label = document.getElementById(group.getAttribute("aria-labelledby") ?? "")?.textContent?.trim() ?? "";
     const radios = Array.from(group.querySelectorAll('[role="radio"]')).map((r) => {
       const rect = r.getBoundingClientRect();
-      const spans = Array.from(r.querySelectorAll("span")).map((e) => e.textContent?.trim() ?? "");
+      const spans = Array.from(r.querySelectorAll(":scope > span > span")).map((e) => e.textContent?.trim() ?? "");
+      const badge = r.querySelector("[data-model-status]");
       return {
         option: r.getAttribute("data-engine-option"),
-        name: spans.length >= 2 ? spans[1] : (r.textContent?.trim() ?? ""),
-        description: spans.length >= 3 ? spans[2] : "",
+        name: spans.length >= 1 ? spans[0] : (r.textContent?.trim() ?? ""),
+        description: r.querySelector("[data-engine-hint]")?.textContent?.trim() ?? "",
+        badge: badge ? { status: badge.getAttribute("data-model-status"), text: badge.textContent?.trim() ?? "" } : null,
         checked: r.getAttribute("aria-checked"),
         rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height },
       };
     });
-    const hint = group.nextElementSibling?.tagName === "P" ? (group.nextElementSibling.textContent?.trim() ?? "") : null;
+    const hintEl = group.nextElementSibling?.tagName === "P" ? group.nextElementSibling : null;
+    const hint = hintEl ? (hintEl.querySelector("[data-engine-hint]")?.textContent?.trim() ?? "") : null;
+    const hintBadge = hintEl?.querySelector("[data-model-status]");
+    const badge = hintBadge ? { status: hintBadge.getAttribute("data-model-status"), text: hintBadge.textContent?.trim() ?? "" } : null;
     const redo = Array.from(document.querySelectorAll("button")).some((b) => /^Redo this photo$/.test(b.textContent?.trim() ?? "") && b.getClientRects().length > 0);
-    return { label, radios, hint, redo };
+    return { label, radios, hint, badge, redo };
+  });
+
+/** The right side of the visible caption under the photo: name (wider layouts), dimensions and time. */
+const captionRight = (page) =>
+  page.evaluate(() => {
+    const b = Array.from(document.querySelectorAll("span[data-engine]")).find((e) => e.getClientRects().length > 0);
+    return b?.nextElementSibling?.textContent?.trim() ?? null;
   });
 
 /** The texts in the polite live region right now. */
@@ -570,8 +686,310 @@ async function runModel(browser) {
   const caption = await engineCaption(page);
   check(caption !== null && !caption.isButton && /^Cut on your (processor|graphics chip)/.test(caption.tooltip ?? ""), `engine caption is plain text with a tooltip (${caption?.tooltip})`);
 
+  await modelCachePass(ctx, page, png);
   await ctx.close();
   return png;
+}
+
+/**
+ * The model cache, on the page that just ran the model: the service worker controls it, its
+ * bucket holds every chunk of the WebAssembly model (the worker hashes each one after handing
+ * it to the page, so the last may land a moment after the cut), and the picker's badges say
+ * so: "Downloaded" under Processor only, "About 105 MB, downloads once" under Automatic,
+ * which describes the graphics-chip model on every device, headless included. Then a fresh
+ * page in the same context, with the weights origin blocked both ways (Playwright aborts what
+ * the page asks for, the mirror answers 503 to the worker), finishes a photo from the cache.
+ * The same context, not a fresh one: Cache Storage and the registration are per profile.
+ */
+async function modelCachePass(ctx, page, png) {
+  const label = (s) => `model cache: ${s}`;
+  const expected = await chunkUrls(WASM_FILES);
+  check(expected.length > 0, label(`the manifest lists the WebAssembly files (${expected.length} chunks)`));
+  let facts = null;
+  for (let i = 0; i < 40; i++) {
+    facts = await page.evaluate(
+      async ({ urls, name }) => {
+        const controller = !!navigator.serviceWorker?.controller;
+        const keys = await caches.keys();
+        const cache = await caches.open(name);
+        let held = 0;
+        for (const u of urls) if (await cache.match(u)) held++;
+        const entries = (await cache.keys()).length;
+        const persisted = (await navigator.storage?.persisted?.().catch(() => null)) ?? null;
+        return { controller, keys, held, entries, persisted };
+      },
+      { urls: expected, name: MODEL_CACHE },
+    );
+    if (facts.controller && facts.held === expected.length) break;
+    await sleep(250);
+  }
+  console.log(`info model cache ${JSON.stringify(facts)}`);
+  check(facts.controller, label("the service worker controls the page"));
+  check(facts.keys.includes(MODEL_CACHE), label(`caches.keys() includes ${MODEL_CACHE} (${facts.keys.join(", ") || "none"})`));
+  check(facts.held === expected.length, label(`the cache holds every chunk of the WebAssembly model (${facts.held} of ${expected.length}; ${facts.entries} entries in all)`));
+
+  // The badges, in More on the phone layout, where both options show at once.
+  await page.setViewportSize(VIEWPORTS[0]);
+  await sleep(300);
+  await page.click('nav[aria-label="Photo actions"] button:has-text("More")');
+  await page.waitForSelector("dialog[open]");
+  let p = null;
+  for (let i = 0; i < 25; i++) {
+    p = await enginePicker(page);
+    if (p?.radios.length === 2 && p.radios.every((r) => r.badge && r.badge.status !== "unknown")) break;
+    await sleep(200);
+  }
+  const auto = p?.radios.find((r) => r.option === "auto");
+  const wasm = p?.radios.find((r) => r.option === "wasm");
+  check(wasm?.badge?.text === "Downloaded" && wasm.badge.status === "downloaded", label(`"Processor only" says Downloaded (${wasm?.badge?.text})`));
+  check(auto?.badge?.text === "About 105 MB, downloads once" && auto.badge.status === "missing", label(`"Automatic" says "About 105 MB, downloads once" (${auto?.badge?.text})`));
+  await page.screenshot({ path: `${SHOTS}/phone-more-badges.png` });
+  await page.click('dialog[open] button:has-text("Done")');
+  await sleep(300);
+
+  // A fresh document (the library's session is gone with the old one) with the origin blocked.
+  const blocked = await ctx.newPage();
+  watch(blocked, "model-cache-blocked", { quiet: true });
+  await blocked.route(`${MODEL_BASE}**`, (route) => route.abort());
+  const before = mirror ? { ...mirror.stats } : null;
+  if (mirror) mirror.blocked = true;
+  try {
+    await blocked.setViewportSize(VIEWPORTS[2]);
+    await blocked.goto(`${BASE}/`, { waitUntil: "networkidle" });
+    const controlled = await blocked.evaluate(() => !!navigator.serviceWorker?.controller);
+    check(controlled, label("the fresh page is controlled from the start"));
+    await blocked.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
+    const t0 = Date.now();
+    let done = true;
+    try {
+      await blocked.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+    } catch {
+      done = false;
+    }
+    check(done, label(`a photo reaches done with the weights origin blocked, in ${Math.round((Date.now() - t0) / 1000)}s`));
+    if (!done) await blocked.screenshot({ path: `${SHOTS}/model-cache-blocked-failed.png` });
+    if (mirror) {
+      const chunks = mirror.stats.blockedChunks - before.blockedChunks;
+      const manifests = mirror.stats.blockedManifests - before.blockedManifests;
+      check(chunks === 0, label(`no chunk request reached the mirror while blocked (${chunks} chunks, ${manifests} manifest requests refused)`));
+    }
+    if (done) {
+      const b = await engineCaption(blocked);
+      check(b?.label === "Processor", label(`the caption reads Processor (${b?.label})`));
+    }
+  } finally {
+    if (mirror) mirror.blocked = false;
+    await blocked.close();
+  }
+}
+
+/**
+ * The colour picker. The custom swatch is a radio with the native colour input laid over it,
+ * so what a finger or a pointer lands on at its centre is the input itself: the only way iOS
+ * Safari opens its picker. A value set through the input (the native setter plus an `input`
+ * event, which is what a picker dispatches) picks Custom and colours the swatch and the
+ * result. Before the cut the input is disabled with the rest. Then at desktop width: the
+ * same hit test, and the keyboard path, arrows along the radios to Custom and Space to open.
+ */
+async function colourPickerPass(browser, png) {
+  const label = (s) => `colour picker: ${s}`;
+  const ctx = await newContext(browser, { ...VIEWPORTS[0], theme: "light", touch: true });
+  const page = await ctx.newPage();
+  watch(page, "colour-picker");
+  await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  await page.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
+  await page.waitForSelector("img[alt='disc.png']", { timeout: 10_000 });
+  const early = await page.evaluate(() => {
+    const input = Array.from(document.querySelectorAll('input[type="color"]')).find((i) => i.getClientRects().length > 0);
+    return input ? { disabled: input.disabled, done: !!document.querySelector("img[alt$=', background removed']") } : null;
+  });
+  check(early !== null && (early.disabled || early.done), label(`the input is disabled before the cut (disabled ${early?.disabled}, done ${early?.done})`));
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(label("photo reaches done state"));
+    await ctx.close();
+    return;
+  }
+  await sleep(500);
+
+  const hit = () =>
+    page.evaluate(() => {
+      const swatch = Array.from(document.querySelectorAll('[role="radio"][data-kind="custom"]')).find((b) => b.getClientRects().length > 0);
+      if (!swatch) return null;
+      const r = swatch.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const el = document.elementFromPoint(x, y);
+      const input = swatch.parentElement?.querySelector('input[type="color"]');
+      return {
+        tag: el?.tagName ?? null,
+        type: el?.getAttribute("type") ?? null,
+        isInput: !!input && el === input,
+        disabled: input?.disabled ?? null,
+        ariaHidden: input?.getAttribute("aria-hidden") ?? null,
+        ariaLabel: input?.getAttribute("aria-label") ?? null,
+        tabIndex: input?.tabIndex ?? null,
+        cursor: input ? getComputedStyle(input).cursor : null,
+        checked: swatch.getAttribute("aria-checked"),
+        background: swatch.style.background,
+        size: Math.round(r.width),
+      };
+    });
+  const pickColour = (hex) =>
+    page.evaluate((hex) => {
+      const input = Array.from(document.querySelectorAll('input[type="color"]')).find((i) => i.getClientRects().length > 0);
+      // The native setter, so React's value tracking sees the change and does not swallow the event.
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, hex);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, hex);
+  const stageColour = () =>
+    page.evaluate(() => Array.from(document.querySelectorAll("div[style]")).find((d) => d.style.backgroundColor && d.getClientRects().length > 0)?.style.backgroundColor ?? null);
+
+  let h = await hit();
+  console.log(`info colour picker phone elementFromPoint ${JSON.stringify(h)}`);
+  check(h?.isInput === true && h.type === "color", label(`phone: elementFromPoint at the centre of the Custom swatch is the input[type=color] (${h?.tag} type=${h?.type})`));
+  check(h?.size >= 44, label(`phone: the swatch is ${h?.size}px`));
+  check(
+    h?.disabled === false && h.ariaHidden === null && h.ariaLabel === "Custom colour" && h.tabIndex === -1 && h.cursor === "pointer",
+    label(`phone: the input is enabled, labelled "Custom colour", not aria-hidden, out of the tab order, cursor pointer (${JSON.stringify({ disabled: h?.disabled, ariaHidden: h?.ariaHidden, ariaLabel: h?.ariaLabel, tabIndex: h?.tabIndex, cursor: h?.cursor })})`),
+  );
+  check(h?.checked === "false", label("phone: Custom is not checked before a colour is picked"));
+  await pickColour("#1e90ff");
+  await sleep(250);
+  h = await hit();
+  const colour = await stageColour();
+  check(h?.checked === "true", label(`phone: a value through the native input picks Custom (aria-checked ${h?.checked})`));
+  check(h?.background === "rgb(30, 144, 255)", label(`phone: the swatch follows (${h?.background})`));
+  check(colour === "rgb(30, 144, 255)", label(`phone: the result backdrop follows (${colour})`));
+  await page.screenshot({ path: `${SHOTS}/phone-colour-picker.png` });
+
+  // Desktop: the same hit test, then the keyboard path.
+  await page.setViewportSize(VIEWPORTS[2]);
+  await sleep(400);
+  h = await hit();
+  console.log(`info colour picker desktop elementFromPoint ${JSON.stringify(h)}`);
+  check(h?.isInput === true && h.type === "color", label(`desktop: elementFromPoint at the centre of the Custom swatch is the input[type=color] (${h?.tag} type=${h?.type})`));
+  await page.click('[role="radio"][data-kind="transparent"]:visible');
+  await sleep(100);
+  const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-kind") ?? document.activeElement?.tagName ?? null);
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  await sleep(150);
+  let f = await focused();
+  check(f === "custom", label(`desktop: three arrows from Transparent land on Custom (${f})`));
+  h = await hit();
+  check(h?.checked === "true", label(`desktop: arriving by arrow picks the colour chosen before (aria-checked ${h?.checked}, ${h?.background})`));
+  const errorsBefore = problems.filter((p) => /colour-picker pageerror/.test(p)).length;
+  await page.keyboard.press("Space");
+  await sleep(300);
+  f = await focused();
+  const errorsAfter = problems.filter((p) => /colour-picker pageerror/.test(p)).length;
+  check(f === "custom" && errorsAfter === errorsBefore, label(`desktop: Space on Custom opens the picker without moving focus or throwing (focus ${f})`));
+  await page.keyboard.press("Escape");
+  await pickColour("#30a46c");
+  await sleep(250);
+  h = await hit();
+  check(h?.checked === "true" && h.background === "rgb(48, 164, 108)" && (await stageColour()) === "rgb(48, 164, 108)", label(`desktop: a second colour reaches the swatch and the result (${h?.background})`));
+  await page.screenshot({ path: `${SHOTS}/desktop-colour-picker.png` });
+  await ctx.close();
+}
+
+/**
+ * The crash guard and the decode path. A context whose sessionStorage says a cut was in
+ * flight when the last document went away: the page starts with the note, switches the
+ * visit to 2,048 px (a 3000x2000 photo is fitted to 2048x1365, the caption says so), still
+ * makes thumbnails, and marks the job while it runs; started again with the flag already
+ * set, the note also points at Processor only. Then a JPEG with EXIF orientation 6 on a
+ * fresh page: the card reads the upright size without a full decode.
+ */
+async function memoryGuardPass(browser, png) {
+  const label = (s) => `crash guard: ${s}`;
+  const NOTE = `The page reloaded while cutting the last photo, which usually means it ran out of memory. Photos are now scaled to ${LOW_MEMORY_EDGE.toLocaleString("en-US")} px before the cut for this visit.`;
+  const AGAIN = "If it keeps happening, pick Processor only under engine.";
+  const ctx = await newContext(browser, { ...VIEWPORTS[0], theme: "light", touch: true });
+  await ctx.addInitScript(() => {
+    try {
+      sessionStorage.setItem("rmbg:inflight", JSON.stringify({ engine: "wasm", edge: 4096 }));
+    } catch {}
+  });
+  const page = await ctx.newPage();
+  watch(page, "crash-guard");
+  await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  const notice = () => page.evaluate(() => document.querySelector('[role="alert"][data-notice="info"] p')?.textContent?.trim() ?? null);
+  let text = await notice();
+  console.log(`info crash notice: ${text}`);
+  check(text === NOTE, label(`the note reads as written (${text})`));
+  const flags = await page.evaluate(() => ({ low: sessionStorage.getItem("rmbg:low-memory"), inflight: sessionStorage.getItem("rmbg:inflight") }));
+  check(flags.low === "1" && flags.inflight === null, label(`rmbg:low-memory is "1" and the mark is taken (${JSON.stringify(flags)})`));
+  await page.screenshot({ path: `${SHOTS}/phone-crash-notice.png` });
+  // Once more: the init script leaves the mark again, and the flag is already there.
+  await page.reload({ waitUntil: "networkidle" });
+  text = await notice();
+  check(text === `${NOTE} ${AGAIN}`, label(`the second note adds the Processor only hint (${text})`));
+
+  const big = await sharp(png).resize(3000, 2000).png().toBuffer();
+  await page.setInputFiles("#pick", { name: "big.png", mimeType: "image/png", buffer: big });
+  let marked = null;
+  for (let i = 0; i < 50 && !marked; i++) {
+    marked = await page.evaluate(() => sessionStorage.getItem("rmbg:inflight"));
+    if (!marked) await sleep(100);
+  }
+  let mark = null;
+  try {
+    mark = JSON.parse(marked);
+  } catch {}
+  check(mark?.edge === LOW_MEMORY_EDGE, label(`the mark is set while the job runs, with the visit's edge (${marked})`));
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(label("the 3000x2000 photo reaches done state"));
+    await page.screenshot({ path: `${SHOTS}/phone-crash-failed.png` });
+    await ctx.close();
+    return;
+  }
+  await sleep(600);
+  const after = await page.evaluate(() => sessionStorage.getItem("rmbg:inflight"));
+  check(after === null, label(`the mark is cleared once the job settles (${after})`));
+  const caption = await captionRight(page);
+  check(/^3,000 × 2,000 → 2,048 × 1,365/.test(caption ?? ""), label(`the caption reads 3,000 × 2,000 → 2,048 × 1,365 (${caption})`));
+  const { width, height } = await resultRgba(page);
+  check(width === 2048 && height === 1365, label(`the result is 2048x1365 (${width}x${height})`));
+  const thumb = await page.evaluate(async () => {
+    const original = document.querySelector("img[alt='big.png']")?.src ?? null;
+    const swatch = Array.from(document.querySelectorAll('[role="radio"][data-kind="blur"] img')).find((i) => i.getClientRects().length > 0);
+    if (!swatch) return null;
+    const bmp = await createImageBitmap(await (await fetch(swatch.src)).blob());
+    return { distinct: swatch.src !== original, width: bmp.width, height: bmp.height };
+  });
+  check(thumb?.distinct === true && Math.max(thumb.width, thumb.height) <= 320, label(`a thumbnail is still made (${thumb?.width}x${thumb?.height}, distinct from the original ${thumb?.distinct})`));
+  await page.screenshot({ path: `${SHOTS}/phone-crash-result.png` });
+
+  // A JPEG with EXIF orientation 6: 800x600 pixels shown upright as 600x800.
+  const exifLabel = (s) => `exif: ${s}`;
+  const exif = await sharp(png).jpeg({ quality: 90 }).withMetadata({ orientation: 6 }).toBuffer();
+  const meta = await sharp(exif).metadata();
+  check(meta.width === 800 && meta.height === 600 && meta.orientation === 6, exifLabel(`test JPEG is 800x600 with orientation 6 (${meta.width}x${meta.height}, ${meta.orientation})`));
+  const page2 = await ctx.newPage();
+  watch(page2, "exif");
+  await page2.setViewportSize(VIEWPORTS[2]);
+  await page2.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  await page2.setInputFiles("#pick", { name: "side.jpg", mimeType: "image/jpeg", buffer: exif });
+  try {
+    await page2.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(exifLabel("photo reaches done state"));
+    await ctx.close();
+    return;
+  }
+  await sleep(600);
+  const dims = await page2.evaluate(() => document.querySelector("aside p.font-mono")?.textContent?.trim() ?? null);
+  check(/^600 × 800/.test(dims ?? ""), exifLabel(`the card reads the upright size, 600 × 800 (${dims})`));
+  const side = await captionRight(page2);
+  const out = await resultRgba(page2);
+  console.log(`info exif caption "${side}", result ${out.width}x${out.height}`);
+  check(/600 × 800/.test(side ?? ""), exifLabel(`the caption reads 600 × 800 (${side})`));
+  check(out.width === 600 && out.height === 800, exifLabel(`the cutout is upright too (${out.width}x${out.height})`));
+  await ctx.close();
 }
 
 /**
@@ -757,6 +1175,10 @@ async function gpuSelfCheckPass(browser, png) {
 
   await page.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
   const t0 = Date.now();
+  // The card first (the original on the stage): it is added before any decode or model work,
+  // so a page that shows none never saw the file, a different failure from a run that never finished.
+  const added = await page.waitForSelector("img[alt='disc.png']", { timeout: 10_000 }).then(() => true, () => false);
+  check(added, label("the card is added"));
   const { result: done, toasts } = await withToasts(page, async () => {
     try {
       await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
@@ -767,8 +1189,20 @@ async function gpuSelfCheckPass(browser, png) {
   });
   check(done, label(`photo reaches done state in ${Math.round((Date.now() - t0) / 1000)}s`));
   if (!done) {
-    await page.screenshot({ path: `${SHOTS}/webgpu-selfcheck-failed.png` });
-    await ctx.close();
+    // What the page was doing when time ran out, for the log: the queue, the status line, the frame, the crash guard's mark.
+    const state = await page
+      .evaluate(() => ({
+        card: !!document.querySelector("img[alt='disc.png']"),
+        status: Array.from(document.querySelectorAll('[role="status"], [aria-live]')).map((e) => e.textContent?.trim().slice(0, 120)).filter(Boolean),
+        frames: document.querySelectorAll('iframe[src="/gpu-frame"]').length,
+        inflight: sessionStorage.getItem("rmbg:inflight"),
+        lowMemory: sessionStorage.getItem("rmbg:low-memory"),
+        title: document.title,
+      }))
+      .catch((e) => String(e).split("\n")[0]);
+    console.log(`info webgpu self-check timed out: toasts ${JSON.stringify(toasts)} state ${JSON.stringify(state)}`);
+    await page.screenshot({ path: `${SHOTS}/webgpu-selfcheck-failed.png` }).catch(() => {});
+    await ctx.close().catch(() => {});
     return;
   }
   console.log(`info webgpu self-check toasts ${JSON.stringify(toasts)}`);
@@ -1162,32 +1596,49 @@ async function rateLimitPass() {
   check(code === "rate_limited", label(`429 code is rate_limited (${code})`));
 }
 
+/**
+ * Runs one pass; an exception (a page that went away, a browser that crashed) counts as one
+ * failed check with the pass's name and lets the next pass run, so a flaky pass still leaves
+ * a full report instead of an aborted one.
+ */
+async function step(name, run) {
+  try {
+    return await run();
+  } catch (e) {
+    fail(`${name}: threw ${String(e).split("\n")[0]}`);
+    return undefined;
+  }
+}
+
 async function main() {
   const maskCheck = await loadMaskCheck();
   maskCheckUnit(maskCheck);
   canRedoUnit(await loadCanRedo());
+  mirror = await startMirror();
   await ensureServer();
   const browser = await launch();
   let png = null;
   try {
-    await shootEmpty(browser);
-    await shootDocs(browser);
-    png = await runModel(browser);
-    await enginePass(browser, maskCheck);
-    if (png) await enginePickerPass(browser, png);
-    if (png) await engineTapPass(browser, png);
-    if (png && process.env.E2E_WEBGPU) await gpuSelfCheckPass(browser, png);
-    if (png) await shootResult(browser, png);
-    else {
+    await step("empty states", () => shootEmpty(browser));
+    await step("docs", () => shootDocs(browser));
+    png = (await step("model run", () => runModel(browser))) ?? null;
+    await step("engine", () => enginePass(browser, maskCheck));
+    if (png) await step("engine picker", () => enginePickerPass(browser, png));
+    if (png) await step("engine tap", () => engineTapPass(browser, png));
+    if (png) await step("colour picker", () => colourPickerPass(browser, png));
+    if (png) await step("crash guard", () => memoryGuardPass(browser, png));
+    if (png && process.env.E2E_WEBGPU) await step("webgpu self-check", () => gpuSelfCheckPass(browser, png));
+    if (png && browser.isConnected()) await step("result states", () => shootResult(browser, png));
+    else if (!png) {
       // The API checks need the test image even when the in-browser model did not finish.
       const page = await browser.newPage();
       png = await makeTestPng(page);
       await page.close();
     }
   } finally {
-    await browser.close();
+    await browser.close().catch(() => {});
   }
-  if (CDN_CACHE) console.log(`info model CDN cache at ${CDN_CACHE}: ${cdnStats.hits} chunks served from disk, ${cdnStats.misses} fetched and kept`);
+  if (mirror) console.log(`info model mirror from ${CDN_CACHE}: ${mirror.stats.hits} chunks served from disk, ${mirror.stats.misses} fetched and kept`);
   await framePass();
   await apiPass(png);
   await rateLimitPass();
@@ -1207,5 +1658,6 @@ main()
   .finally(() => {
     if (server) server.kill();
     if (limitServer) limitServer.kill();
+    mirror?.server.close();
     process.exit(failures ? 1 : 0);
   });
