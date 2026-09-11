@@ -17,9 +17,10 @@ const RAINBOW = "conic-gradient(from 0deg, #e5484d, #f5a524, #30a46c, #0091ff, #
 
 /**
  * Transparent · white · black · custom · blur as a radiogroup of round swatches. The custom
- * swatch is the native colour input laid over a radio: pointer taps open the picker directly,
- * keyboard activation opens it through `showPicker`, and live `input` events are throttled
- * to one update per frame (iOS fires them continuously).
+ * swatch is a radio with the native colour input behind it: activating the radio (pointer or
+ * keyboard) opens the picker through `showPicker` (`click()` where that is missing), so focus
+ * never lands on the hidden input, and live `input` events are throttled to one update per
+ * frame (iOS fires them continuously).
  */
 export function BackgroundPicker({
   value,
@@ -137,7 +138,7 @@ export function BackgroundPicker({
                 tabIndex={-1}
                 disabled={disabled}
                 onInput={(e) => onColorInput(e.currentTarget.value)}
-                className="absolute inset-0 size-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+                className="pointer-events-none absolute inset-0 size-full opacity-0"
               />
             </span>
           );

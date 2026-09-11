@@ -12,7 +12,8 @@ const MESSAGES = {
 
 /**
  * The inline error under the stage for a failed card, with the actions that make sense for its
- * error: a download or inference failure can be retried, a format or runtime failure cannot.
+ * error: everything but a format failure can be retried (a model that would not download or
+ * start is re-initialised from scratch), and the card that holds the queue is not removed here.
  */
 export function Notice({ card, onRetry, onRemove, className }: { card: Card; onRetry: () => void; onRemove: () => void; className?: string }) {
   const error = card.error ?? "inference";
@@ -21,7 +22,7 @@ export function Notice({ card, onRetry, onRemove, className }: { card: Card; onR
       <CircleAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
       <p className="min-w-0 flex-1 text-fg">{MESSAGES[error]}</p>
       <div className="flex shrink-0 gap-1.5 max-sm:basis-full max-sm:justify-end">
-        {error !== "decode" && error !== "engine" && (
+        {error !== "decode" && (
           <Button size="sm" className="[@media(pointer:coarse)]:h-11" onClick={onRetry}>
             Try again
           </Button>

@@ -132,7 +132,12 @@ export function ActionButtons({
   trailing?: ReactNode;
 }) {
   const { download, copy, share, canCopy, canShare, composing, copied, ready } = actions;
-  const hint = (k: string) => <Kbd className="ml-auto hidden lg:inline-flex">{k}</Kbd>;
+  // Hidden from the accessible name (the `title` carries the key), so the button is not read as "Download PNG d".
+  const hint = (k: string) => (
+    <Kbd aria-hidden className="ml-auto hidden lg:inline-flex">
+      {k}
+    </Kbd>
+  );
   // Tablets are touch screens too: the row's buttons match the 44px swatches beside them.
   const fit = cn(layout === "column" && "w-full", layout === "row" && "[@media(pointer:coarse)]:h-11");
 

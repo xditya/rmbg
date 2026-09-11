@@ -2,7 +2,7 @@
 
 import { Check, CircleAlert, LoaderCircle, Plus, X } from "lucide-react";
 import { Button, IconButton } from "@/components/ui/button";
-import { cardStatus, type Card, type Download } from "@/hooks/use-queue";
+import { cardStatus, isDownloading, type Card, type Download } from "@/hooks/use-queue";
 import { formatBytes, formatDims, formatMs } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
@@ -130,7 +130,8 @@ export function Queue({ cards: rows, selectedId, download, onSelect, onRemove, o
       <ul className="min-h-0 flex-1 overflow-y-auto" aria-label="Queue">
         {cards.map((card) => {
           const running = card.state === "loading-model" || card.state === "removing";
-          const pct = card.state === "loading-model" && card.progress && card.progress.total > 0 ? card.progress.loaded / card.progress.total : null;
+          // Determinate only while bytes are in flight; the session starting is a sweep, like a run.
+          const pct = card.state === "loading-model" && card.progress && isDownloading(card.progress) ? card.progress.loaded / card.progress.total : null;
           return (
             <li
               key={card.id}
@@ -155,7 +156,8 @@ export function Queue({ cards: rows, selectedId, download, onSelect, onRemove, o
                 size="sm"
                 label={`Remove ${card.name}`}
                 onClick={() => onRemove(card.id)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100"
+                // Hidden until the row is hovered or any part of it (the row button too) has focus, so keyboard users see it.
+                className="absolute right-2 top-1/2 -translate-y-1/2 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100"
               >
                 <X className="size-4" />
               </IconButton>

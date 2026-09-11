@@ -59,7 +59,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             key={t.id}
             role="status"
             data-leaving={t.leaving || undefined}
-            className="animate-fade-up pointer-events-auto flex max-w-md items-center gap-2.5 rounded-lg border border-border bg-surface px-3.5 py-2.5 text-[13px] shadow-pop transition-[opacity,transform] duration-150 ease-quint data-[leaving]:translate-y-1 data-[leaving]:opacity-0"
+            // Docked at the top on phones, so there the motion comes from above and leaves upward.
+            className="animate-fade-up pointer-events-auto flex max-w-md items-center gap-2.5 rounded-lg border border-border bg-surface px-3.5 py-2.5 text-[13px] shadow-pop transition-[opacity,transform] duration-150 ease-quint data-[leaving]:translate-y-1 data-[leaving]:opacity-0 max-sm:[animation-name:fade-down] max-sm:data-[leaving]:-translate-y-1"
           >
             {t.kind === "success" && <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden />}
             {t.kind === "error" && <CircleAlert className="size-4 shrink-0 text-danger" aria-hidden />}

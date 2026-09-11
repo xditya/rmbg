@@ -11,7 +11,7 @@ export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 const base =
-  "inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium transition-[background-color,border-color,color,opacity,transform] duration-200 ease-quint active:scale-[.97] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100";
+  "inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium transition-[background-color,border-color,color,opacity,transform] duration-200 ease-quint active:scale-[.97] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 aria-busy:cursor-progress aria-busy:opacity-70 aria-busy:active:scale-100";
 
 const variants: Record<Variant, string> = {
   primary: "border-accent bg-accent text-accent-fg hover:brightness-110",
@@ -27,12 +27,24 @@ const sizes: Record<Size, string> = {
   lg: "h-11 px-4 text-[15px]",
 };
 
+/**
+ * `loading` is not `disabled`: disabling the focused button drops keyboard focus to <body>
+ * (Firefox and Safari) or into limbo (Chrome), and it is not given back when the work ends.
+ * The button stays focusable, says it is busy, and ignores activation until then.
+ */
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { className, variant = "secondary", size = "md", loading, children, disabled, ...props },
+  { className, variant = "secondary", size = "md", loading, children, disabled, onClick, ...props },
   ref,
 ) {
   return (
-    <button ref={ref} className={cn(base, variants[variant], sizes[size], className)} disabled={disabled || loading} {...props}>
+    <button
+      ref={ref}
+      className={cn(base, variants[variant], sizes[size], className)}
+      disabled={disabled}
+      aria-busy={loading || undefined}
+      onClick={loading ? (e) => e.preventDefault() : onClick}
+      {...props}
+    >
       {loading && <span className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" aria-hidden />}
       {children}
     </button>
@@ -53,7 +65,7 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: s
       ref={ref}
       aria-label={label}
       title={label}
-      className={cn(base, variants[variant], size === "sm" ? "size-7 max-sm:size-9" : "size-8 max-sm:size-10", "px-0", className)}
+      className={cn(base, variants[variant], size === "sm" ? "size-7 max-sm:size-11" : "size-8 max-sm:size-10", "px-0", className)}
       {...props}
     >
       {children}

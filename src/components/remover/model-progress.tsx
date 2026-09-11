@@ -9,7 +9,7 @@ import { formatMB } from "@/lib/format";
  * total that is revised upwards must not pull the bar back. A different total is a different
  * download (the WebAssembly fallback after WebGPU failed) and starts the bar over.
  */
-export function ModelProgress({ loaded = 0, total = 0, mode }: { loaded?: number; total?: number; mode: "determinate" | "indeterminate" }) {
+export function ModelProgress({ loaded = 0, total = 0, mode, label }: { loaded?: number; total?: number; mode: "determinate" | "indeterminate"; label?: string }) {
   const determinate = mode === "determinate";
   const fraction = determinate && total > 0 ? Math.min(1, loaded / total) : 0;
   const [shown, setShown] = useState({ mode, total, fraction });
@@ -19,7 +19,7 @@ export function ModelProgress({ loaded = 0, total = 0, mode }: { loaded?: number
   return (
     <div
       role="progressbar"
-      aria-label={determinate ? "Model download" : "Removing background"}
+      aria-label={label ?? (determinate ? "Model download" : "Removing background")}
       aria-valuemin={0}
       aria-valuemax={determinate ? 100 : undefined}
       aria-valuenow={determinate ? Math.round(shownFraction * 100) : undefined}
@@ -27,7 +27,8 @@ export function ModelProgress({ loaded = 0, total = 0, mode }: { loaded?: number
       className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden"
     >
       {determinate ? (
-        <div className="h-full w-full origin-left bg-accent transition-transform duration-200 ease-quint" style={{ transform: `scaleX(${shownFraction})` }} />
+        // Keyed on the download so a new one (a different total) starts at 0 instead of easing back from full.
+        <div key={`${mode}:${total}`} className="h-full w-full origin-left bg-accent transition-transform duration-200 ease-quint" style={{ transform: `scaleX(${shownFraction})` }} />
       ) : (
         <>
           <div className="h-full w-1/3 bg-accent animate-slide-x motion-reduce:hidden" />

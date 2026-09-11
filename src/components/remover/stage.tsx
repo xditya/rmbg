@@ -2,7 +2,7 @@
 
 import { useRef, useState, type CSSProperties } from "react";
 import type { Card } from "@/hooks/use-queue";
-import { cardStatus } from "@/hooks/use-queue";
+import { cardStatus, isDownloading } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
 import type { Engine } from "@/lib/remove";
 import { backdropColor, blurRadius, type BackdropChoice } from "@/lib/backdrop";
@@ -75,9 +75,10 @@ export function Stage({
   return (
     <div
       className={cn(
-        "flex flex-col bg-surface-2 max-sm:h-[min(54dvh,520px)] max-sm:min-h-[280px] max-sm:border-b max-sm:border-border",
+        // svh, not dvh: phone browser bars retract during a scroll and a dvh box would resize under the thumb.
+        "flex flex-col bg-surface-2 max-sm:h-[min(54svh,520px)] max-sm:min-h-[280px] max-sm:border-b max-sm:border-border",
         // The minimum gives way on short viewports (a phone held sideways) so the controls stay on screen.
-        "sm:h-[clamp(200px,62dvh,640px)] sm:min-h-[min(360px,calc(100dvh-9rem))] sm:overflow-hidden sm:rounded-lg sm:border sm:border-border lg:h-[calc(100dvh-7.75rem)] lg:min-h-[480px]",
+        "sm:h-[clamp(200px,62svh,640px)] sm:min-h-[min(360px,calc(100svh-9rem))] sm:overflow-hidden sm:rounded-lg sm:border sm:border-border lg:h-[calc(100dvh-7.75rem)] lg:min-h-[480px]",
         className,
       )}
     >
@@ -94,7 +95,7 @@ export function Stage({
                 <>
                   <div
                     aria-hidden
-                    className={cn("absolute inset-0 transition-[background-color,opacity] duration-200 ease-quint", color ? "opacity-100" : "opacity-0")}
+                    className={cn("absolute inset-0 transition-opacity duration-200 ease-quint", color ? "opacity-100" : "opacity-0")}
                     style={color ? { backgroundColor: color } : undefined}
                   />
                   {/* eslint-disable-next-line @next/next/no-img-element -- object URL, not an asset */}
@@ -113,6 +114,7 @@ export function Stage({
                 <img
                   src={card.resultUrl}
                   alt={`${card.name}, background removed`}
+                  aria-hidden={!done || undefined}
                   draggable={false}
                   className={cn("absolute inset-0 size-full object-contain transition-opacity duration-200 ease-quint", done ? "animate-fade-in opacity-100 [animation-duration:240ms]" : "opacity-0")}
                 />
@@ -121,6 +123,7 @@ export function Stage({
               <img
                 src={card.originalUrl}
                 alt={card.name}
+                aria-hidden={v === "result" || undefined}
                 draggable={false}
                 className={cn("absolute inset-0 size-full object-contain transition-opacity duration-200 ease-quint", v === "result" ? "opacity-0" : "opacity-100")}
                 style={clipped ? { clipPath: "inset(0 calc(100% - var(--x, 50%)) 0 0)" } : undefined}
@@ -132,7 +135,12 @@ export function Stage({
                   <Compare frameRef={frame} value={compare} onChange={onCompare} onDragging={setDragging} />
                 </>
               )}
-              {card.state === "loading-model" && <ModelProgress mode="determinate" loaded={download?.loaded} total={download?.total} />}
+              {card.state === "loading-model" &&
+                (isDownloading(download) ? (
+                  <ModelProgress mode="determinate" loaded={download?.loaded} total={download?.total} />
+                ) : (
+                  <ModelProgress mode="indeterminate" label="Starting the model" />
+                ))}
               {card.state === "removing" && <ModelProgress mode="indeterminate" />}
             </>
           ) : (
@@ -189,6 +197,13 @@ export function StatusLine({
   let title: string | undefined;
   switch (card.state) {
     case "loading-model":
+      // Once the bytes have landed (at once, from the cache, on a repeat visit) the session is
+      // being created; that is not a download and is not the first run.
+      if (!isDownloading(download)) {
+        left = "starting the model";
+        right = withName ? card.name : "";
+        break;
+      }
       // The first-run note lives here, where the row already has the room, so nothing shifts.
       left = firstRun ? (withName ? "downloading model · first run, cached after this" : "downloading model · first run") : "downloading model";
       right = download && download.total > 0 ? formatMB(download.loaded, download.total) : modelDownloadNote(known);

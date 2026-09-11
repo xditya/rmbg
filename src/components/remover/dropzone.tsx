@@ -15,7 +15,6 @@ import { cn } from "@/lib/cn";
  */
 export function Dropzone({
   over,
-  coarse,
   mac,
   engine,
   onPick,
@@ -24,7 +23,6 @@ export function Dropzone({
   pickRef,
 }: {
   over: boolean;
-  coarse: boolean;
   mac: boolean;
   /** Decides the size quoted for the first download; null until detection finishes. */
   engine: Engine | null;
@@ -44,8 +42,9 @@ export function Dropzone({
       aria-label="Add a photo"
       data-over={over || undefined}
       className={cn(
-        "flex min-h-[calc(100dvh-6rem)] flex-1 flex-col items-center justify-center border-dashed border-border-strong bg-surface px-6 text-center transition-colors duration-200 ease-quint",
-        "max-sm:rounded-none max-sm:border-y sm:min-h-[calc(100dvh-7.75rem)] sm:rounded-lg sm:border",
+        // svh: sized to the viewport with the phone's browser bars shown, so the hero never shifts mid-scroll.
+        "flex min-h-[calc(100svh-6rem)] flex-1 flex-col items-center justify-center border-dashed border-border-strong bg-surface px-6 text-center transition-colors duration-200 ease-quint",
+        "max-sm:rounded-none max-sm:border-y sm:min-h-[calc(100svh-7.75rem)] sm:rounded-lg sm:border",
         // As a variant, so it outranks the base colours whatever order the stylesheet emits them in.
         "data-over:border-accent data-over:bg-accent-soft",
       )}
@@ -59,12 +58,14 @@ export function Dropzone({
             <ImagePlus className="size-4" aria-hidden />
             Choose a photo
           </Button>
-          {coarse && (
+          {/* Gated in CSS, not state, so the hero is laid out the same before and after hydration on phones.
+              A wrapper, because the Button's own display class would win over `hidden`. */}
+          <span className="hidden [@media(pointer:coarse)]:contents">
             <Button variant="secondary" size="lg" onClick={onSnap} onPointerDown={onIntent} onKeyDown={onKey}>
               <Camera className="size-4" aria-hidden />
               Take a photo
             </Button>
-          )}
+          </span>
         </div>
         <p className={cn("relative mt-4 h-5 w-full text-[12.5px]", over ? "text-fg-muted" : "text-fg-faint")}>
           <span className={cn("absolute inset-x-0 whitespace-nowrap transition-opacity duration-150 ease-quint", over ? "opacity-0" : "opacity-100")}>

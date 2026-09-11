@@ -33,7 +33,9 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
       el.querySelector<HTMLElement>("[autofocus], [data-autofocus]")?.focus();
     }
     if (!open && el.open) {
-      // The exit plays before the native close (see `dialog[data-closing]` in globals.css).
+      // The exit plays before the native close (see `dialog[data-closing]` in globals.css); an
+      // inline transition left by a touch on the header would beat it and skip the fade.
+      el.style.transition = "";
       el.dataset.closing = "";
       const t = setTimeout(() => {
         if (el.open) el.close();
@@ -71,13 +73,17 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
     if (d.dy > SWIPE_CLOSE) {
       // Already off screen when it closes, so the native close (and its `close` event) is the
       // exit here; the inline styles are reset on the next open.
-      el.style.transition = "transform 160ms ease-in";
+      el.style.transition = "transform 160ms var(--ease)";
       el.style.transform = "translateY(100%)";
       setTimeout(() => el.close(), 150);
       return;
     }
     el.style.transition = "transform 200ms var(--ease)";
     el.style.transform = "";
+    // Only for the snap-back: a close after it must get the stylesheet's fade.
+    setTimeout(() => {
+      if (el.style.transition === "transform 200ms var(--ease)") el.style.transition = "";
+    }, 200);
   };
 
   return (
@@ -99,7 +105,7 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
           <h2 id={titleId} className="min-w-0 truncate text-[14px] font-semibold">
             {title}
           </h2>
-          <IconButton label="Close" size="sm" onClick={onClose}>
+          <IconButton label="Close" size="sm" onClick={onClose} className="[@media(pointer:coarse)]:size-11">
             <X className="size-4" />
           </IconButton>
         </div>

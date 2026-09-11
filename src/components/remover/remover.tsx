@@ -5,8 +5,8 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useEngine } from "@/hooks/use-engine";
 import { isMac, useHotkeys, type Hotkey } from "@/hooks/use-hotkeys";
-import { useClientFact, useMedia } from "@/hooks/use-media";
-import { useQueue } from "@/hooks/use-queue";
+import { useClientFact } from "@/hooks/use-media";
+import { isDownloading, useQueue } from "@/hooks/use-queue";
 import { TRANSPARENT, type BackdropChoice } from "@/lib/backdrop";
 import { LIMITS, SITE } from "@/lib/config";
 import { formatBytes, formatDims, formatMs, formatWholeMB } from "@/lib/format";
@@ -72,7 +72,6 @@ export function Remover() {
   const [reveal, setReveal] = useState<string | null>(null);
   const [firstRunShown, setFirstRunShown] = useState(false);
 
-  const coarse = useMedia("(pointer: coarse)");
   const mac = useClientFact(isMac, false);
 
   const announce = useCallback((text: string) => {
@@ -81,7 +80,7 @@ export function Remover() {
   }, []);
 
   const engine = useEngine({
-    onDownload: (phase) => announce(phase === "start" ? "Downloading the model" : "Model downloaded"),
+    onDownload: (phase, pct) => announce(phase === "start" ? "Downloading the model" : phase === "end" ? "Model downloaded" : `Model ${pct}% downloaded`),
   });
 
   /** The Compare-at-50 reveal, unless the person has picked a view themselves. */
@@ -96,10 +95,12 @@ export function Remover() {
   const queue = useQueue({
     ensureModel: engine.ensure,
     modelReady: engine.isReady,
+    // Right after a WebGPU fallback too: `noteResult` has reported the engine by then.
+    blocksMainThread: () => engine.engine !== "webgpu",
     onStart: (card) => announce(`Removing the background from ${card.name}`),
     onDone: (card, result) => {
       engine.noteResult(result.engine);
-      announce(`Done. ${formatMs(result.ms)}`);
+      announce(`${card.name} done in ${formatMs(result.ms)}`);
       // Only the card on the stage may move the view; a background finish waits for its first selection.
       if (card.id === selectedRef.current) revealCard(card.id);
       else unrevealed.current.add(card.id);
@@ -283,14 +284,23 @@ export function Remover() {
   );
   useHotkeys(hotkeys, { within: root });
 
+  const download = selected?.progress ?? engine.download;
+  // The phase comes from the bytes, not the clock: on a cached load they all land within a
+  // few hundred ms and the rest of loading-model is the session starting, not a download.
+  const downloading = isDownloading(download);
+
   // The tab title follows the queue, on transitions only.
   useEffect(() => {
     const { total, done, failed, loading, removing } = counts;
-    document.title = loading ? `downloading the model · ${SITE.name}` : removing ? `removing ${Math.min(total, done + failed + 1)} of ${total} · ${SITE.name}` : DEFAULT_TITLE;
+    document.title = loading
+      ? `${downloading ? "downloading" : "starting"} the model · ${SITE.name}`
+      : removing
+        ? `removing ${Math.min(total, done + failed + 1)} of ${total} · ${SITE.name}`
+        : DEFAULT_TITLE;
     return () => {
       document.title = DEFAULT_TITLE;
     };
-  }, [counts]);
+  }, [counts, downloading]);
 
   // The first-run note waits 300ms so cached weights never flash it.
   const loadingSelected = selected?.state === "loading-model";
@@ -299,7 +309,7 @@ export function Remover() {
     const t = setTimeout(() => setFirstRunShown(true), 300);
     return () => clearTimeout(t);
   }, [loadingSelected, firstRunShown]);
-  const firstRun = firstRunShown && loadingSelected && !engine.ready;
+  const firstRun = firstRunShown && loadingSelected && !engine.ready && downloading;
 
   useEffect(() => {
     selectedRef.current = selectedId;
@@ -327,7 +337,6 @@ export function Remover() {
 
   const shownView = effectiveView(selected, view);
   const done = selected?.state === "done";
-  const download = selected?.progress ?? engine.download;
   const waitingForModel = !!selected && selected.state === "queued" && counts.loading;
   const removeHint = mac ? "⌘ Backspace" : "Ctrl Backspace";
   // The selected card's own error, else the model failure that is holding the whole queue.
@@ -370,9 +379,11 @@ export function Remover() {
       </div>
 
       {empty || !selected ? (
-        <Dropzone over={depth > 0} coarse={coarse} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} pickRef={heroPick} />
+        <Dropzone over={depth > 0} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} pickRef={heroPick} />
       ) : (
         <>
+          {/* The hero's heading leaves with it; heading navigation still needs one for the tool. */}
+          <h1 className="sr-only">{SITE.tagline}</h1>
           <div className="flex min-w-0 flex-1 flex-col animate-fade-in">
             <Stage
               card={selected}
@@ -436,7 +447,8 @@ export function Remover() {
             )}
           </div>
 
-          <aside className="hidden w-[320px] shrink-0 flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface animate-fade-in lg:flex">
+          {/* Bound to the viewport like the stage (and not stretched to the row), so the queue list scrolls instead of the page. */}
+          <aside className="hidden w-[320px] shrink-0 flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface animate-fade-in lg:flex lg:h-[calc(100dvh-7.75rem)] lg:min-h-[480px] lg:self-start">
             <div className="px-4 py-3">
               <p className="truncate text-[13px] font-medium">{selected.name}</p>
               <p className="font-mono text-[12px] text-fg-faint">

@@ -186,11 +186,17 @@
     transform: none;
   }
 }
-/* `backwards`, not `both`: the end frame is the natural state, and a held `opacity: 1` would beat the exit classes. */
-.animate-fade-up {
-  animation: fade-up 240ms var(--ease) backwards;
+/* The same entrance for surfaces docked at the top edge (phone toasts). */
+@keyframes fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
-
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -199,7 +205,13 @@
     opacity: 1;
   }
 }
-.animate-fade-in {
+/* As utilities (not plain classes, which would sit outside the cascade layers and beat every
+   utility) so per-use overrides such as `[animation-duration:240ms]` apply. `backwards`, not
+   `both`: the end frame is the natural state, and a held `opacity: 1` would beat the exit classes. */
+@utility animate-fade-up {
+  animation: fade-up 240ms var(--ease) backwards;
+}
+@utility animate-fade-in {
   animation: fade-in 200ms var(--ease) backwards;
 }
 
@@ -244,7 +256,7 @@
     transform: translateX(300%);
   }
 }
-.animate-slide-x {
+@utility animate-slide-x {
   animation: slide-x 1.2s linear infinite;
 }
 
