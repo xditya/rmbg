@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { Card } from "@/hooks/use-queue";
 import { cardStatus, isDownloading } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
@@ -74,7 +74,72 @@ export function Stage({
   const rw = card.resultWidth ?? card.width ?? 1;
   const blurPx = rect ? (blurRadius(rw, card.resultHeight ?? card.height ?? 1) * rect.width) / rw : 0;
 
-  const frameStyle: CSSProperties | undefined = rect ? { width: rect.width, height: rect.height } : undefined;
+  /* ── Zoom + Pan ── */
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragStart = useRef<{ cx: number; cy: number; px: number; py: number } | null>(null);
+
+  // Reset zoom and pan when card changes
+  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [card.id]);
+
+  const [isPanning, setIsPanning] = useState(false);
+
+  // Reset pan when zoom returns to 1
+  useEffect(() => { if (zoom === 1) setPan({ x: 0, y: 0 }); }, [zoom]);
+
+  // Wheel-to-zoom on the stage area (needs non-passive to preventDefault)
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom((z) => {
+        const delta = e.deltaY > 0 ? -0.15 : 0.15;
+        return Math.round(Math.min(5, Math.max(1, z + delta)) * 100) / 100;
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Window-level mousemove / mouseup for pan drag (started by onMouseDown on the area div)
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = dragStart.current;
+      if (!d) return;
+      e.preventDefault();
+      setPan({ x: d.px + (e.clientX - d.cx), y: d.py + (e.clientY - d.cy) });
+    };
+    const onUp = () => {
+      dragStart.current = null;
+      setIsPanning(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  /** Start a pan drag — called from the area div's onMouseDown. */
+  const startPan = (e: React.MouseEvent) => {
+    if (zoom <= 1) return;
+    // When zoomed in: left-click (button 0) or middle-click (button 1) directly pans!
+    if (e.button === 0 || e.button === 1) {
+      e.preventDefault();
+      setIsPanning(true);
+      dragStart.current = { cx: e.clientX, cy: e.clientY, px: pan.x, py: pan.y };
+    }
+  };
+
+  const frameStyle: CSSProperties | undefined = rect
+    ? {
+        width: rect.width,
+        height: rect.height,
+        transform: zoom !== 1 ? `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` : undefined,
+      }
+    : undefined;
   const preMeta: CSSProperties | undefined = !rect && box ? { maxWidth: box.width, maxHeight: box.height } : undefined;
 
   return (
@@ -87,11 +152,22 @@ export function Stage({
         className,
       )}
     >
-      <div ref={area} className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center p-3 sm:p-6">
+      <div
+        ref={area}
+        className={cn(
+          "relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden p-3 sm:p-6",
+          zoom > 1 && (isPanning ? "cursor-grabbing" : "cursor-grab"),
+        )}
+        onMouseDown={startPan}
+      >
         <div
           ref={frame}
           data-dragging={dragging || undefined}
-          className={cn("group/frame relative select-none overflow-hidden rounded-md bg-checker ring-1 ring-border/60", !rect && !box && "invisible")}
+          className={cn(
+            "group/frame relative select-none overflow-hidden rounded-md bg-checker ring-1 ring-border/60",
+            !rect && !box && "invisible",
+            zoom > 1 && (isPanning ? "cursor-grabbing" : "cursor-grab"),
+          )}
           style={frameStyle}
         >
           {rect ? (
@@ -154,6 +230,41 @@ export function Stage({
             <img src={card.originalUrl} alt={card.name} draggable={false} className="block object-contain" style={preMeta} />
           )}
         </div>
+
+        {/* Zoom controls */}
+        {rect && (
+          <div className="absolute bottom-2 right-2 z-20 flex items-center gap-0.5 rounded-md border border-border bg-surface/90 px-1 py-0.5 font-mono text-[12px] backdrop-blur-sm">
+            <button
+              type="button"
+              className="flex h-6 w-6 items-center justify-center rounded text-fg-muted transition-colors hover:text-fg disabled:opacity-30"
+              onClick={() => setZoom((z) => Math.max(1, Math.round((z - 0.25) * 100) / 100))}
+              disabled={zoom <= 1}
+              title="Zoom out"
+            >
+              −
+            </button>
+            <span className="w-10 text-center tabular-nums text-fg-faint">{Math.round(zoom * 100)}%</span>
+            <button
+              type="button"
+              className="flex h-6 w-6 items-center justify-center rounded text-fg-muted transition-colors hover:text-fg disabled:opacity-30"
+              onClick={() => setZoom((z) => Math.min(5, Math.round((z + 0.25) * 100) / 100))}
+              disabled={zoom >= 5}
+              title="Zoom in"
+            >
+              +
+            </button>
+            {zoom !== 1 && (
+              <button
+                type="button"
+                className="ml-0.5 flex h-6 items-center justify-center rounded px-1.5 text-[11px] text-fg-muted transition-colors hover:text-fg"
+                onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+                title="Reset zoom"
+              >
+                fit
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <div className="hidden h-8 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 font-mono text-[12px] text-fg-faint sm:flex">
         <StatusLine card={card} engine={engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} withName />
