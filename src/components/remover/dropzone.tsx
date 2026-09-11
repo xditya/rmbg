@@ -1,7 +1,7 @@
 "use client";
 
 import { Camera, ImagePlus } from "lucide-react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, RefObject } from "react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Logo } from "@/components/logo";
@@ -21,6 +21,7 @@ export function Dropzone({
   onPick,
   onSnap,
   onIntent,
+  pickRef,
 }: {
   over: boolean;
   coarse: boolean;
@@ -31,6 +32,8 @@ export function Dropzone({
   onSnap: () => void;
   /** First sign the person means it: warms the model. */
   onIntent: () => void;
+  /** The primary button, so the page can put focus back here when the queue empties. */
+  pickRef?: RefObject<HTMLButtonElement | null>;
 }) {
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") onIntent();
@@ -43,7 +46,8 @@ export function Dropzone({
       className={cn(
         "flex min-h-[calc(100dvh-6rem)] flex-1 flex-col items-center justify-center border-dashed border-border-strong bg-surface px-6 text-center transition-colors duration-200 ease-quint",
         "max-sm:rounded-none max-sm:border-y sm:min-h-[calc(100dvh-7.75rem)] sm:rounded-lg sm:border",
-        over && "border-accent bg-accent-soft",
+        // As a variant, so it outranks the base colours whatever order the stylesheet emits them in.
+        "data-over:border-accent data-over:bg-accent-soft",
       )}
     >
       <div className="flex w-full max-w-[520px] flex-col items-center animate-fade-in">
@@ -51,7 +55,7 @@ export function Dropzone({
         <h1 className="mt-5 text-[28px] font-semibold leading-[1.15] tracking-tight sm:text-[36px]">{SITE.tagline}</h1>
         <p className="mt-3 text-[15px] text-fg-muted">Nothing is uploaded. The model runs on your device.</p>
         <div className="mt-6 flex w-full max-w-[280px] flex-col gap-2 sm:max-w-none sm:flex-row sm:justify-center">
-          <Button variant="primary" size="lg" onClick={onPick} onPointerDown={onIntent} onKeyDown={onKey}>
+          <Button ref={pickRef} variant="primary" size="lg" onClick={onPick} onPointerDown={onIntent} onKeyDown={onKey}>
             <ImagePlus className="size-4" aria-hidden />
             Choose a photo
           </Button>

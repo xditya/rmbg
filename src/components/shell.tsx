@@ -8,7 +8,8 @@ import { cn } from "@/lib/cn";
 /**
  * App chrome: a slim top bar, a content slot that fills the viewport, a one-line footer.
  * `mobile` is for pages with a fixed bottom bar on phones: the content goes full-bleed, <main>
- * pads above the bar and the footer is dropped (its link lives in the page text instead).
+ * pads above the bar while one is rendered and the footer is dropped (its link lives in the
+ * page text instead).
  */
 export function Shell({ children, actions, className, mobile }: { children: ReactNode; actions?: ReactNode; className?: string; mobile?: boolean }) {
   return (
@@ -25,7 +26,7 @@ export function Shell({ children, actions, className, mobile }: { children: Reac
           </div>
         </div>
       </header>
-      <main className={cn("mx-auto flex w-full max-w-6xl flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4", mobile && "max-sm:px-0 max-sm:py-0 max-sm:pb-bar", className)}>{children}</main>
+      <main className={cn("mx-auto flex w-full max-w-6xl flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4", mobile && "max-sm:px-0 max-sm:py-0 max-sm:has-[nav.fixed]:pb-bar", className)}>{children}</main>
       <footer className={cn(mobile ? "max-sm:hidden" : "max-sm:pb-safe")}>
         <div className="mx-auto flex w-full max-w-6xl items-center gap-x-4 px-4 py-3 font-mono text-[12px] text-fg-faint">
           <a href={SITE.repo} className="transition-colors hover:text-fg" rel="noopener noreferrer" target="_blank">

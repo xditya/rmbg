@@ -2,13 +2,15 @@
 
 import { Check, CircleAlert, LoaderCircle, Plus, X } from "lucide-react";
 import { Button, IconButton } from "@/components/ui/button";
-import { cardStatus, type Card } from "@/hooks/use-queue";
+import { cardStatus, type Card, type Download } from "@/hooks/use-queue";
 import { formatBytes, formatDims, formatMs } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 type Props = {
   cards: Card[];
   selectedId: string | null;
+  /** The shared model download, shown on the card that is waiting for it (its own progress is empty then). */
+  download?: Download | null;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
   onAdd: () => void;
@@ -66,7 +68,9 @@ function header(cards: Card[]): string {
  * The queue, only rendered once there are two or more photos: a hairline list in the desktop
  * column, a thumbnail strip under the stage on tablets and phones. Both end with an add tile.
  */
-export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll, layout, className }: Props) {
+export function Queue({ cards: rows, selectedId, download, onSelect, onRemove, onAdd, onClearAll, layout, className }: Props) {
+  // The preload's progress lands on the engine, not the card; the waiting card borrows it.
+  const cards = rows.map((c) => (c.state === "loading-model" && !c.progress && download ? { ...c, progress: download } : c));
   const live = cards.filter((c) => !c.leaving);
   const waiting = live.some((c) => c.state === "loading-model");
 
@@ -84,7 +88,7 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
             onClick={() => onSelect(card.id)}
             style={stagger(card)}
             className={cn(
-              "relative size-16 shrink-0 snap-start overflow-hidden rounded-md ring-1 ring-border transition-[opacity,transform] duration-150 ease-quint sm:size-20",
+              "relative size-16 shrink-0 snap-start overflow-hidden rounded-md ring-1 ring-border transition-[opacity,transform] duration-150 ease-quint active:scale-[.97] sm:size-20",
               !card.leaving && "animate-fade-up",
               "aria-[current=true]:ring-2 aria-[current=true]:ring-accent data-[leaving]:-translate-y-1 data-[leaving]:opacity-0",
             )}
@@ -101,13 +105,13 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
           type="button"
           aria-label="Add photos"
           onClick={onAdd}
-          className="flex size-16 shrink-0 snap-start items-center justify-center rounded-md border border-dashed border-border-strong text-fg-muted transition-colors hover:border-accent hover:text-fg sm:size-20"
+          className="flex size-16 shrink-0 snap-start items-center justify-center rounded-md border border-dashed border-border-strong text-fg-muted transition-[border-color,color,transform] duration-200 ease-quint hover:border-accent hover:text-fg active:scale-[.97] sm:size-20"
         >
           <Plus className="size-4" aria-hidden />
         </button>
         {/* Phones have Clear all in the More sheet; a wrapper hides it here because the Button's own display class would win. */}
         <span className="ml-1 hidden shrink-0 sm:contents">
-          <Button size="sm" variant="ghost" onClick={onClearAll}>
+          <Button size="sm" variant="ghost" className="[@media(pointer:coarse)]:h-11" onClick={onClearAll}>
             Clear all
           </Button>
         </span>
@@ -138,7 +142,7 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
                 type="button"
                 aria-current={card.id === selectedId || undefined}
                 onClick={() => onSelect(card.id)}
-                className="flex h-14 w-full items-center gap-3 px-4 pr-12 text-left transition-colors hover:bg-surface-2/60 aria-[current=true]:bg-surface-2"
+                className="flex h-14 w-full items-center gap-3 px-4 pr-12 text-left transition-colors hover:bg-surface-2/60 focus-visible:-outline-offset-2 active:bg-surface-2 aria-[current=true]:bg-surface-2"
               >
                 <Thumb card={card} className="relative size-10 rounded-sm" />
                 <span className="flex min-w-0 flex-1 flex-col">
@@ -171,7 +175,12 @@ export function Queue({ cards, selectedId, onSelect, onRemove, onAdd, onClearAll
           );
         })}
         <li>
-          <button type="button" aria-label="Add photos" onClick={onAdd} className="flex h-12 w-full items-center gap-3 px-4 text-[13px] text-fg-muted transition-colors hover:bg-surface-2/60 hover:text-fg">
+          <button
+            type="button"
+            aria-label="Add photos"
+            onClick={onAdd}
+            className="flex h-12 w-full items-center gap-3 px-4 text-[13px] text-fg-muted transition-colors hover:bg-surface-2/60 hover:text-fg focus-visible:-outline-offset-2 active:bg-surface-2"
+          >
             <span className="flex size-10 items-center justify-center rounded-sm border border-dashed border-border-strong">
               <Plus className="size-4" aria-hidden />
             </span>

@@ -76,7 +76,8 @@ export function Stage({
     <div
       className={cn(
         "flex flex-col bg-surface-2 max-sm:h-[min(54dvh,520px)] max-sm:min-h-[280px] max-sm:border-b max-sm:border-border",
-        "sm:h-[min(62dvh,640px)] sm:min-h-[360px] sm:overflow-hidden sm:rounded-lg sm:border sm:border-border lg:h-[calc(100dvh-7.75rem)] lg:min-h-[480px]",
+        // The minimum gives way on short viewports (a phone held sideways) so the controls stay on screen.
+        "sm:h-[clamp(200px,62dvh,640px)] sm:min-h-[min(360px,calc(100dvh-9rem))] sm:overflow-hidden sm:rounded-lg sm:border sm:border-border lg:h-[calc(100dvh-7.75rem)] lg:min-h-[480px]",
         className,
       )}
     >
@@ -218,7 +219,8 @@ export function StatusLine({
   }
   return (
     <>
-      <span className="shrink-0 truncate">{left}</span>
+      {/* On phones the right side is short or empty, so the left may shrink there; elsewhere the name yields. */}
+      <span className="shrink-0 truncate max-sm:min-w-0 max-sm:shrink">{left}</span>
       <span className="ml-auto min-w-0 truncate text-right" title={title}>
         {right}
       </span>

@@ -26,6 +26,7 @@ export function useActions(card: Card | null, choice: BackdropChoice) {
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [composing, setComposing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const busyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canCopy = useClientFact(canCopyImages, false);
   const canShare = useClientFact(canShareFiles, false);
   const ready = !!card && card.state === "done" && !!card.resultBlob;
@@ -33,9 +34,23 @@ export function useActions(card: Card | null, choice: BackdropChoice) {
   useEffect(
     () => () => {
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      if (busyTimer.current) clearTimeout(busyTimer.current);
     },
     [],
   );
+
+  /** Runs an action; the button only shows its spinner when the compose takes a while, so a cached PNG never flashes it. */
+  const busy = useCallback(async (work: () => Promise<void>) => {
+    if (busyTimer.current) clearTimeout(busyTimer.current);
+    busyTimer.current = setTimeout(() => setComposing(true), 250);
+    try {
+      await work();
+    } finally {
+      if (busyTimer.current) clearTimeout(busyTimer.current);
+      busyTimer.current = null;
+      setComposing(false);
+    }
+  }, []);
 
   const compose = useCallback((): Promise<Blob> | null => {
     if (!card || card.state !== "done") return null;
@@ -56,47 +71,44 @@ export function useActions(card: Card | null, choice: BackdropChoice) {
   const download = useCallback(async () => {
     const p = compose();
     if (!p || !card) return;
-    setComposing(true);
-    try {
-      saveBlob(await p, resultName(card.name));
-    } catch {
-      push("error", "Couldn't compose the PNG. Try a different background.");
-    } finally {
-      setComposing(false);
-    }
-  }, [compose, card, push]);
+    await busy(async () => {
+      try {
+        saveBlob(await p, resultName(card.name));
+      } catch {
+        push("error", "Couldn't compose the PNG. Try a different background.");
+      }
+    });
+  }, [compose, card, push, busy]);
 
   const copy = useCallback(async () => {
     const p = compose();
     if (!p) return;
-    setComposing(true);
-    try {
-      // The promise form keeps Safari's gesture window alive while the PNG is composed.
-      await copyPng(p);
-      push("success", "Copied as PNG");
-      setCopied(true);
-      if (copiedTimer.current) clearTimeout(copiedTimer.current);
-      copiedTimer.current = setTimeout(() => setCopied(false), 1500);
-    } catch {
-      push("error", "Copy failed. Download it instead.");
-    } finally {
-      setComposing(false);
-    }
-  }, [compose, push]);
+    await busy(async () => {
+      try {
+        // The promise form keeps Safari's gesture window alive while the PNG is composed.
+        await copyPng(p);
+        push("success", "Copied as PNG");
+        setCopied(true);
+        if (copiedTimer.current) clearTimeout(copiedTimer.current);
+        copiedTimer.current = setTimeout(() => setCopied(false), 1500);
+      } catch {
+        push("error", "Copy failed. Download it instead.");
+      }
+    });
+  }, [compose, push, busy]);
 
   const share = useCallback(async () => {
     const p = compose();
     if (!p || !card) return;
-    setComposing(true);
-    try {
-      const blob = await p;
-      await sharePng(new File([blob], resultName(card.name), { type: "image/png" }));
-    } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError")) push("error", "Sharing didn't work. Download it instead.");
-    } finally {
-      setComposing(false);
-    }
-  }, [compose, card, push]);
+    await busy(async () => {
+      try {
+        const blob = await p;
+        await sharePng(new File([blob], resultName(card.name), { type: "image/png" }));
+      } catch (e) {
+        if (!(e instanceof DOMException && e.name === "AbortError")) push("error", "Sharing didn't work. Download it instead.");
+      }
+    });
+  }, [compose, card, push, busy]);
 
   return useMemo(() => ({ download, copy, share, canCopy, canShare, composing, copied, ready }), [download, copy, share, canCopy, canShare, composing, copied, ready]);
 }
@@ -107,33 +119,45 @@ function CopyIcon({ copied }: { copied: boolean }) {
   return copied ? <Check className="size-4 animate-fade-in text-success" aria-hidden /> : <Copy className="size-4 animate-fade-in" aria-hidden />;
 }
 
-/** Desktop column (stacked, with key hints) or tablet toolbar (a row). */
-export function ActionButtons({ actions, layout, onDoAnother }: { actions: Actions; layout: "column" | "row"; onDoAnother: () => void }) {
+/** Desktop column (stacked, with key hints) or tablet toolbar (a full-width row, with `trailing` pushed to its end). */
+export function ActionButtons({
+  actions,
+  layout,
+  onDoAnother,
+  trailing,
+}: {
+  actions: Actions;
+  layout: "column" | "row";
+  onDoAnother: () => void;
+  trailing?: ReactNode;
+}) {
   const { download, copy, share, canCopy, canShare, composing, copied, ready } = actions;
   const hint = (k: string) => <Kbd className="ml-auto hidden lg:inline-flex">{k}</Kbd>;
+  // Tablets are touch screens too: the row's buttons match the 44px swatches beside them.
+  const fit = cn(layout === "column" && "w-full", layout === "row" && "[@media(pointer:coarse)]:h-11");
 
   const primary = (
-    <Button variant="primary" onClick={download} disabled={!ready} loading={composing} title="Download PNG (d)" className={cn(layout === "column" && "w-full")}>
+    <Button variant="primary" onClick={download} disabled={!ready} loading={composing} title="Download PNG (d)" className={fit}>
       <Download className="size-4" aria-hidden />
       Download PNG
       {layout === "column" && hint("d")}
     </Button>
   );
   const copyButton = canCopy ? (
-    <Button key="copy" onClick={copy} disabled={!ready} title="Copy to clipboard (c)" className={cn(layout === "column" && "w-full")}>
+    <Button key="copy" onClick={copy} disabled={!ready} title="Copy to clipboard (c)" className={fit}>
       <CopyIcon copied={copied} />
       Copy
       {layout === "column" && hint("c")}
     </Button>
   ) : null;
   const shareButton = canShare ? (
-    <Button key="share" onClick={share} disabled={!ready} title="Share the PNG" className={cn(layout === "column" && "w-full")}>
+    <Button key="share" onClick={share} disabled={!ready} title="Share the PNG" className={fit}>
       <Share className="size-4" aria-hidden />
       Share
     </Button>
   ) : null;
   const another = (
-    <Button key="another" variant="ghost" onClick={onDoAnother} title="Add another photo (n)" className={cn(layout === "column" && "w-full")}>
+    <Button key="another" variant="ghost" onClick={onDoAnother} title="Add another photo (n)" className={fit}>
       <Plus className="size-4" aria-hidden />
       Do another
       {layout === "column" && hint("n")}
@@ -141,12 +165,14 @@ export function ActionButtons({ actions, layout, onDoAnother }: { actions: Actio
   );
 
   if (layout === "row") {
+    // A row of its own under the view switch and swatches, so the wrap is deliberate rather than ragged.
     return (
-      <div className="ml-auto flex flex-wrap items-center gap-1.5">
+      <div className="flex w-full items-center gap-1.5">
         {primary}
         {copyButton}
         {shareButton}
         {another}
+        {trailing}
       </div>
     );
   }

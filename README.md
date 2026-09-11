@@ -16,7 +16,7 @@ PNG, JPEG, WebP, GIF, BMP and AVIF work, up to 25 MB each (the limits live in `s
 
 ## nothing is uploaded
 
-There is no server side to this. The page is static, there are no API routes, no analytics, no accounts and no cookies. The only requests the app makes on its own are the ones that fetch the model and its runtime from imgly's CDN, once; after that they come from the browser cache.
+There is no server side to this beyond serving the page: no API routes, no analytics, no accounts and no cookies. The only requests the app makes on its own are the ones that fetch the model and its runtime from imgly's CDN, once; after that they come from the browser cache.
 
 ## the model
 
@@ -49,6 +49,6 @@ The Content Security Policy in `src/proxy.ts` is deliberately tight. It opens ex
 
 The look borrows from [pastr](https://github.com/xditya/pastr) and [engram](https://github.com/xditya/engram): the same tokens, the same restraint, the same promise that it runs on your device. Icons by [Lucide](https://lucide.dev). Model and runtime by [IMG.LY](https://img.ly) and [ONNX Runtime](https://onnxruntime.ai).
 
-## licence
+## the library's licence
 
 The background-removal library is AGPL-3.0. Its code ships in the page's JavaScript, so if you host rmbg you are bound by those terms unless you buy IMG.LY's commercial licence; the weights are fetched from their CDN, not bundled.

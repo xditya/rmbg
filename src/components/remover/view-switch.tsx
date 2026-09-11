@@ -48,11 +48,19 @@ export function ViewSwitch({
       role="radiogroup"
       aria-label="View"
       onKeyDown={onKeyDown}
-      className={cn("relative grid h-8 grid-cols-3 rounded-md border border-border bg-surface p-0.5 max-sm:h-11 [@media(pointer:coarse)]:h-11", className)}
+      // On touch screens the 2px gutter goes so the radios themselves are the full 44px.
+      className={cn(
+        "relative grid h-8 grid-cols-3 rounded-md border border-border bg-surface p-0.5 max-sm:h-11 max-sm:p-0 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:p-0",
+        className,
+      )}
     >
       <div
         aria-hidden
-        className={cn("absolute inset-y-0.5 left-0.5 w-[calc(33.333%-2px)] rounded-[5px] bg-surface-2 transition-transform duration-200 ease-quint", SHIFT[value])}
+        className={cn(
+          "absolute inset-y-0.5 left-0.5 w-[calc(33.333%-2px)] rounded-[5px] bg-surface-2 transition-transform duration-200 ease-quint",
+          "max-sm:inset-y-0 max-sm:left-0 max-sm:w-1/3 [@media(pointer:coarse)]:inset-y-0 [@media(pointer:coarse)]:left-0 [@media(pointer:coarse)]:w-1/3",
+          SHIFT[value],
+        )}
       />
       {OPTIONS.map((o) => {
         const on = o.key === value;

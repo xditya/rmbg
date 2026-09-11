@@ -7,6 +7,8 @@ import { cn } from "@/lib/cn";
 
 /** Drag distance (px) past which a swipe on the sheet header dismisses it. */
 const SWIPE_CLOSE = 80;
+/** How long the closing fade runs before the element is actually closed. */
+const DIALOG_EXIT_MS = 150;
 
 /**
  * Modal built on the native <dialog> element. Centred on desktop; on phones it becomes a
@@ -26,10 +28,19 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
       // A swipe-dismiss leaves the sheet translated off screen; the element is reused, so reset it.
       el.style.transform = "";
       el.style.transition = "";
+      delete el.dataset.closing;
       el.showModal();
       el.querySelector<HTMLElement>("[autofocus], [data-autofocus]")?.focus();
     }
-    if (!open && el.open) el.close();
+    if (!open && el.open) {
+      // The exit plays before the native close (see `dialog[data-closing]` in globals.css).
+      el.dataset.closing = "";
+      const t = setTimeout(() => {
+        if (el.open) el.close();
+        delete el.dataset.closing;
+      }, DIALOG_EXIT_MS);
+      return () => clearTimeout(t);
+    }
   }, [open]);
 
   // Sheets are often unmounted while open; closing first lets the browser return focus to
@@ -58,13 +69,11 @@ export function Dialog({ open, onClose, title, children, className }: { open: bo
     drag.current = null;
     if (!el || !d) return;
     if (d.dy > SWIPE_CLOSE) {
+      // Already off screen when it closes, so the native close (and its `close` event) is the
+      // exit here; the inline styles are reset on the next open.
       el.style.transition = "transform 160ms ease-in";
       el.style.transform = "translateY(100%)";
-      setTimeout(() => {
-        onClose();
-        el.style.transform = "";
-        el.style.transition = "";
-      }, 150);
+      setTimeout(() => el.close(), 150);
       return;
     }
     el.style.transition = "transform 200ms var(--ease)";

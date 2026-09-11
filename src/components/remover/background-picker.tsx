@@ -83,7 +83,9 @@ export function BackgroundPicker({
     const dir = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (!dir || disabled) return;
     e.preventDefault();
-    const i = ORDER.indexOf(value.kind);
+    // From the focused swatch, not the checked one: focus can rest on Custom before a colour is picked.
+    const cur = (e.target as HTMLElement).closest<HTMLElement>("[data-kind]")?.dataset.kind as Kind | undefined;
+    const i = ORDER.indexOf(cur ?? value.kind);
     const next = ORDER[(i + dir + ORDER.length) % ORDER.length];
     if (next === "custom" && !customHex) {
       e.currentTarget.querySelector<HTMLElement>('[data-kind="custom"]')?.focus();
@@ -95,7 +97,9 @@ export function BackgroundPicker({
 
   const swatch = (kind: Kind, on: boolean) =>
     cn(
-      "relative shrink-0 rounded-full border border-border-strong transition-[opacity,transform] duration-200 ease-quint active:scale-[.97]",
+      "relative shrink-0 rounded-full border transition-[opacity,transform] duration-200 ease-quint active:scale-[.97]",
+      // The flat white and black swatches need a boundary that reads against the surface in either theme.
+      kind === "white" || kind === "black" ? "border-fg/50" : "border-border-strong",
       SIZES[size],
       on && "ring-2 ring-fg ring-offset-2 ring-offset-surface",
       disabled && "cursor-not-allowed opacity-40",

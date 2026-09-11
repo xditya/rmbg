@@ -29,6 +29,21 @@ const ANNOUNCE_MS = 2000;
 
 const isTyping = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
 
+const VIEW_RADIO = '[role="radiogroup"][aria-label="View"] [aria-checked="true"]';
+
+/** How long a leaving row keeps its node (see use-queue); focus is checked again once it is gone. */
+const EXIT_MS = 160;
+
+/** Focuses the first match that is actually rendered: the phone controls and the desktop column both carry a view switch. */
+function focusVisible(root: HTMLElement | null, selector: string): void {
+  Array.from(root?.querySelectorAll<HTMLElement>(selector) ?? [])
+    .find((el) => el.getClientRects().length > 0)
+    ?.focus();
+}
+
+/** Whether nothing useful has focus (the focused control was unmounted, or nothing was focused). */
+const focusLost = () => document.activeElement === document.body || document.activeElement === null;
+
 /**
  * The client root: owns the queue, the engine, the view and backdrop settings, the hidden
  * file inputs, document-level drop and paste, the hotkeys, the live region and the page
@@ -39,7 +54,12 @@ export function Remover() {
   const root = useRef<HTMLDivElement>(null);
   const pickRef = useRef<HTMLInputElement>(null);
   const snapRef = useRef<HTMLInputElement>(null);
+  const heroPick = useRef<HTMLButtonElement>(null);
   const viewChosen = useRef(false);
+  const selectedRef = useRef<string | null>(null);
+  /** Cards that finished while another was on the stage; each gets its Compare reveal when first selected. */
+  const unrevealed = useRef(new Set<string>());
+  const wasEmpty = useRef(true);
   /** How the person last interacted; decides whether focus is moved for them. */
   const modality = useRef<"pointer" | "keyboard">("pointer");
 
@@ -64,6 +84,15 @@ export function Remover() {
     onDownload: (phase) => announce(phase === "start" ? "Downloading the model" : "Model downloaded"),
   });
 
+  /** The Compare-at-50 reveal, unless the person has picked a view themselves. */
+  const revealCard = useCallback((id: string) => {
+    if (!viewChosen.current) {
+      setView("compare");
+      setCompare(50);
+    }
+    setReveal(id);
+  }, []);
+
   const queue = useQueue({
     ensureModel: engine.ensure,
     modelReady: engine.isReady,
@@ -71,11 +100,9 @@ export function Remover() {
     onDone: (card, result) => {
       engine.noteResult(result.engine);
       announce(`Done. ${formatMs(result.ms)}`);
-      if (!viewChosen.current) {
-        setView("compare");
-        setCompare(50);
-      }
-      setReveal(card.id);
+      // Only the card on the stage may move the view; a background finish waits for its first selection.
+      if (card.id === selectedRef.current) revealCard(card.id);
+      else unrevealed.current.add(card.id);
     },
     onFail: (card) => announce(`Couldn't remove the background from ${card.name}`),
   });
@@ -97,7 +124,7 @@ export function Remover() {
       const { added, rejected } = add(files);
       const n = rejected.notImage.length + rejected.tooBig.length;
       if (n === 1) {
-        push("error", rejected.notImage.length ? "That file isn't an image. PNG, JPEG, WebP, GIF, BMP and AVIF work." : `${rejected.tooBig[0]} is larger than ${SIZE_LIMIT}, the limit.`);
+        push("error", rejected.notImage.length ? "That file isn't an image. PNG, JPEG, WebP, GIF, BMP and AVIF work." : `${rejected.tooBig[0]} is over ${SIZE_LIMIT}. Try a smaller copy.`);
       } else if (n > 1) {
         push("error", `${n} files were skipped. Only images under ${SIZE_LIMIT} work.`);
       }
@@ -111,20 +138,43 @@ export function Remover() {
   const openPicker = useCallback(() => pickRef.current?.click(), []);
   const openCamera = useCallback(() => snapRef.current?.click(), []);
 
+  // Remove and Try again unmount the control they were fired from, which would leave focus on
+  // <body> and the hotkeys dead; the view switch takes it once the node is gone (a leaving row
+  // keeps its node for EXIT_MS, hence the second look). The empty state is handled below.
+  const keepFocus = useCallback(() => {
+    const settle = () => {
+      if (focusLost()) focusVisible(root.current, VIEW_RADIO);
+    };
+    requestAnimationFrame(settle);
+    setTimeout(settle, EXIT_MS + 40);
+  }, []);
+
   const removeCard = useCallback(
     (id: string) => {
       const card = cards.find((c) => c.id === id && !c.leaving);
       if (!card) return;
+      unrevealed.current.delete(id);
       remove(id);
       announce(`Removed ${card.name}`);
+      keepFocus();
     },
-    [cards, remove, announce],
+    [cards, remove, announce, keepFocus],
   );
 
   const clearAll = useCallback(() => {
+    unrevealed.current.clear();
+    viewChosen.current = false;
     clear();
     announce("Cleared");
   }, [clear, announce]);
+
+  const retryCard = useCallback(
+    (id: string) => {
+      retry(id);
+      keepFocus();
+    },
+    [retry, keepFocus],
+  );
 
   const chooseView = useCallback(
     (v: View) => {
@@ -251,19 +301,28 @@ export function Remover() {
   }, [loadingSelected, firstRunShown]);
   const firstRun = firstRunShown && loadingSelected && !engine.ready;
 
-  // Adding the first photo unmounts the hero, and with it whatever was focused. Keyboard and
-  // screen-reader users land on the view switch instead of the top of the document.
   useEffect(() => {
-    if (empty) return;
-    const active = document.activeElement;
-    if (modality.current !== "keyboard" && active !== document.body && active !== null) return;
-    root.current?.querySelector<HTMLElement>('[role="radiogroup"][aria-label="View"] [aria-checked="true"]')?.focus();
+    selectedRef.current = selectedId;
+    if (selectedId && unrevealed.current.delete(selectedId)) revealCard(selectedId);
+  }, [selectedId, revealCard]);
+
+  // Adding the first photo unmounts the hero, and removing the last one unmounts the stage,
+  // each with whatever was focused. Keyboard and screen-reader users land on the view switch
+  // or the hero button instead of the top of the document. A fresh queue may reveal again.
+  useEffect(() => {
+    const was = wasEmpty.current;
+    wasEmpty.current = empty;
+    if (empty === was) return;
+    if (empty) viewChosen.current = false;
+    if (modality.current !== "keyboard" && !focusLost()) return;
+    if (empty) heroPick.current?.focus();
+    else focusVisible(root.current, VIEW_RADIO);
   }, [empty]);
 
   // After the reveal, keyboard users land on the slider; pointer users are left alone.
   useEffect(() => {
     if (!reveal || reveal !== selectedId || modality.current !== "keyboard") return;
-    root.current?.querySelector<HTMLElement>('[role="slider"]')?.focus();
+    focusVisible(root.current, '[role="slider"]');
   }, [reveal, selectedId]);
 
   const shownView = effectiveView(selected, view);
@@ -311,7 +370,7 @@ export function Remover() {
       </div>
 
       {empty || !selected ? (
-        <Dropzone over={depth > 0} coarse={coarse} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} />
+        <Dropzone over={depth > 0} coarse={coarse} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} pickRef={heroPick} />
       ) : (
         <>
           <div className="flex min-w-0 flex-1 flex-col animate-fade-in">
@@ -329,7 +388,7 @@ export function Remover() {
             <div className="flex h-8 items-center gap-3 px-4 font-mono text-[12px] text-fg-faint sm:hidden">
               <StatusLine card={selected} engine={engine.engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} />
             </div>
-            {notice && <Notice card={notice} onRetry={() => retry(notice.id)} onRemove={() => removeCard(notice.id)} className="max-sm:mx-4 max-sm:my-2 sm:mt-2" />}
+            {notice && <Notice card={notice} onRetry={() => retryCard(notice.id)} onRemove={() => removeCard(notice.id)} className="max-sm:mx-4 max-sm:my-2 sm:mt-2" />}
 
             {/* Phone and tablet controls; the desktop column has its own. */}
             <div className="flex flex-col gap-3 px-4 py-3 sm:mt-3 sm:flex-row sm:flex-wrap sm:items-center sm:px-0 sm:py-0 lg:hidden">
@@ -343,22 +402,36 @@ export function Remover() {
                 className="justify-center gap-3 sm:justify-start sm:gap-2"
               />
               <div className="hidden sm:contents">
-                <ActionButtons actions={actions} layout="row" onDoAnother={openPicker} />
-                <Button variant="danger" className="border-transparent bg-transparent" aria-label={`Remove ${selected.name}`} title={`Remove (${removeHint})`} onClick={() => removeCard(selected.id)}>
-                  Remove
-                </Button>
+                <ActionButtons
+                  actions={actions}
+                  layout="row"
+                  onDoAnother={openPicker}
+                  trailing={
+                    <Button
+                      variant="danger"
+                      className="ml-auto border-transparent bg-transparent [@media(pointer:coarse)]:h-11"
+                      aria-label={`Remove ${selected.name}`}
+                      title={`Remove (${removeHint})`}
+                      onClick={() => removeCard(selected.id)}
+                    >
+                      Remove
+                    </Button>
+                  }
+                />
               </div>
             </div>
             {multi && (
               <Queue
                 cards={cards}
                 selectedId={selectedId}
+                download={engine.download}
                 onSelect={select}
                 onRemove={removeCard}
                 onAdd={openPicker}
                 onClearAll={clearAll}
                 layout="strip"
-                className="animate-fade-in px-4 pb-3 pt-0.5 scroll-px-4 sm:mt-3 sm:px-0 sm:pb-0.5 sm:scroll-px-0 lg:hidden"
+                // Padding pulled back by margins: the scroll box needs room for the 2px-offset focus ring.
+                className="-mt-1 animate-fade-in px-4 pb-3 pt-1.5 scroll-px-4 sm:-mx-1.5 sm:-mb-1.5 sm:mt-1.5 sm:px-1.5 sm:pb-1.5 sm:scroll-px-1.5 lg:hidden"
               />
             )}
           </div>
@@ -379,7 +452,7 @@ export function Remover() {
               <BackgroundPicker value={backdrop} onChange={setBackdrop} previewUrl={selected.thumbUrl ?? selected.originalUrl} disabled={!done} size="md" className="gap-2" />
             </div>
             {multi && (
-              <Queue cards={cards} selectedId={selectedId} onSelect={select} onRemove={removeCard} onAdd={openPicker} onClearAll={clearAll} layout="list" className="animate-fade-in" />
+              <Queue cards={cards} selectedId={selectedId} download={engine.download} onSelect={select} onRemove={removeCard} onAdd={openPicker} onClearAll={clearAll} layout="list" className="animate-fade-in" />
             )}
             <div className="mt-auto px-4 py-2">
               <Button variant="danger" size="sm" className="w-full border-transparent bg-transparent" title={`Remove (${removeHint})`} onClick={() => removeCard(selected.id)}>

@@ -22,7 +22,7 @@ export default function HomePage() {
 /** Plain words under the tool, server-rendered so search engines and no-JS visitors read them too. */
 function About() {
   return (
-    <section className="mx-auto mt-8 w-full max-w-[560px] text-[13px] leading-6 text-fg-muted max-sm:px-4">
+    <section className="mx-auto mt-8 w-full max-w-[560px] text-[13px] leading-6 text-fg-muted max-sm:px-4 max-sm:pb-6">
       <h2 className="mb-1 font-mono text-[12px] text-fg-faint">what it is</h2>
       <p>
         rmbg cuts the subject out of a photo and gives you a PNG with a transparent, plain or blurred backdrop. Drop one photo or thirty; each one is done on your

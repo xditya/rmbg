@@ -24,6 +24,7 @@ export function Compare({
   onDragging?: (dragging: boolean) => void;
 }) {
   const [dragging, setDragging] = useState(false);
+  const handle = useRef<HTMLDivElement>(null);
   const raf = useRef(0);
   const pending = useRef(value);
 
@@ -55,6 +56,8 @@ export function Compare({
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
+    // preventDefault also stops the click from focusing anything, so the arrow keys apply straight after a drag.
+    handle.current?.focus({ preventScroll: true });
     e.currentTarget.setPointerCapture(e.pointerId);
     start(true);
     write(e.clientX);
@@ -85,7 +88,9 @@ export function Compare({
   };
 
   // Vertical touch pans go to the browser (the page scrolls; we get pointercancel), so only
-  // the handle itself refuses them: a drag that starts there is never interrupted.
+  // the handle itself refuses them: a drag that starts there is never interrupted. The line
+  // follows `--x` to the frame edge; the handle stops half its width short of it so the knob
+  // (and its 44px hit area) is never clipped by the frame.
   return (
     <div
       className="absolute inset-0 cursor-ew-resize touch-pan-y"
@@ -94,7 +99,9 @@ export function Compare({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
     >
+      <div aria-hidden className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-white outline outline-1 outline-black/25" style={{ left: "var(--x, 50%)" }} />
       <div
+        ref={handle}
         role="slider"
         tabIndex={0}
         aria-label="Compare original and result"
@@ -105,10 +112,9 @@ export function Compare({
         aria-orientation="horizontal"
         data-dragging={dragging || undefined}
         onKeyDown={onKeyDown}
-        className="group/handle absolute inset-y-0 w-11 -translate-x-1/2 touch-none rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--ring)]"
-        style={{ left: "var(--x, 50%)" }}
+        className="group/handle absolute inset-y-0 w-11 -translate-x-1/2 touch-none rounded-sm focus-visible:outline-offset-0"
+        style={{ left: "clamp(1.375rem, var(--x, 50%), calc(100% - 1.375rem))" }}
       >
-        <div aria-hidden className="mx-auto h-full w-0.5 bg-white outline outline-1 outline-black/25" />
         <div
           aria-hidden
           className={cn(

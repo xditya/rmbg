@@ -218,6 +218,21 @@
   dialog[open] {
     animation: slide-up 260ms var(--ease) backwards;
   }
+  dialog[open]::backdrop {
+    animation: fade-in 200ms var(--ease) backwards;
+  }
+  /* The exit: the sheet drops back 24px and fades while the component waits to call close(). */
+  dialog[data-closing] {
+    transition:
+      transform 150ms var(--ease),
+      opacity 150ms var(--ease);
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  dialog[data-closing]::backdrop {
+    transition: opacity 150ms var(--ease);
+    opacity: 0;
+  }
 }
 
 /* Indeterminate progress: a third-width segment sweeping along the bar. */
