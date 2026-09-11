@@ -26,6 +26,9 @@ importers:
       onnxruntime-node:
         specifier: 1.21.0
         version: 1.21.0
+      onnxruntime-web:
+        specifier: ^1.21.0
+        version: 1.21.0
       react:
         specifier: 19.2.8
         version: 19.2.8
