@@ -4,7 +4,7 @@ import type { Engine } from "@/lib/remove";
 export const SITE = {
   name: "rmbg",
   tagline: "Drop a photo, keep the subject.",
-  description: "Remove the background from any image, right in your browser. Nothing is uploaded: the model runs on your device and the photo never leaves it.",
+  description: "Remove the background from a photo, right in your browser. Nothing is uploaded: the model runs on your device and the photo never leaves it.",
   repo: "https://github.com/xditya/rmbg",
 } as const;
 

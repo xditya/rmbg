@@ -29,14 +29,15 @@ export function formatMs(ms: number): string {
 
 /**
  * "photo.jpg" → "photo-rmbg.png". The stem is used as a download and share file name, so path
- * separators, control characters and other characters file systems refuse become dashes, and
- * very long names are cut.
+ * separators, control characters (DEL and the Unicode bidi controls too, which would show the
+ * "-rmbg.png" tail reversed) and other characters file systems refuse become dashes, and very
+ * long names are cut.
  */
 export function resultName(name: string): string {
   const stem =
     name
       .replace(/\.[^.]+$/, "")
-      .replace(/[\\/:*?"<>|\x00-\x1f]+/g, "-")
+      .replace(/[\\/:*?"<>|\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, "-")
       .replace(/^[.\s-]+|[.\s-]+$/g, "")
       .slice(0, 120) || "photo";
   return `${stem}-rmbg.png`;

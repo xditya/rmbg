@@ -13,8 +13,11 @@ export type Download = { loaded: number; total: number };
  * the next `ensure()` tries again.
  */
 export type EngineOptions = {
-  /** Fired once when the weights start arriving and once when the download is over. */
-  onDownload?: (phase: "start" | "end") => void;
+  /**
+   * Fired once when the weights start arriving, at each quarter (`pct` 25, 50, 75) so a live
+   * region has something to say during a long download, and once when it is over.
+   */
+  onDownload?: (phase: "start" | "end" | "progress", pct?: number) => void;
 };
 
 export function useEngine(opts: EngineOptions = {}) {
@@ -65,11 +68,18 @@ export function useEngine(opts: EngineOptions = {}) {
     if (!promise.current) {
       setError(null);
       let started = false;
+      let lastQuarter = 0;
       const onProgress = (p: Progress) => {
         if (p.kind !== "download") return;
         if (!started) {
           started = true;
           optsRef.current.onDownload?.("start");
+        }
+        // Quarters only while bytes are still in flight; the end is announced on its own.
+        const quarter = p.total > 0 && p.loaded < p.total ? Math.floor((p.loaded / p.total) * 4) : 0;
+        if (quarter > lastQuarter) {
+          lastQuarter = quarter;
+          optsRef.current.onDownload?.("progress", quarter * 25);
         }
         setDownload({ loaded: p.loaded, total: p.total });
       };

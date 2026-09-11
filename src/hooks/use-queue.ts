@@ -36,7 +36,7 @@ export type Card = {
   leaving?: boolean;
 };
 
-/** `paused` is set by a model download failure and only lasts while that failed card is still in the queue. */
+/** `paused` is set by a model failure (download or start) and only lasts while that failed card is still in the queue. */
 type State = { cards: Card[]; selectedId: string | null; paused: boolean };
 
 type Action =
@@ -68,9 +68,12 @@ function neighbour(cards: Card[], id: string): string | null {
   return next && next.id !== id ? next.id : null;
 }
 
-/** Whether the queue should stay paused: only while the card whose model download failed is still there. */
+/** A download or runtime failure: one condition for the whole queue, so every card after it would fail the same way. */
+const isModelError = (e: CardError | undefined) => e === "model" || e === "engine";
+
+/** Whether the queue should stay paused: only while the card whose model failed is still there. */
 function stillPaused(state: State, cards: Card[]): boolean {
-  return state.paused && cards.some((c) => c.state === "failed" && c.error === "model" && !c.leaving);
+  return state.paused && cards.some((c) => c.state === "failed" && isModelError(c.error) && !c.leaving);
 }
 
 function reducer(state: State, a: Action): State {
@@ -121,7 +124,7 @@ function reducer(state: State, a: Action): State {
     case "fail":
       return {
         ...state,
-        paused: state.paused || a.error === "model",
+        paused: state.paused || isModelError(a.error),
         cards: patch(state.cards, a.id, (c) => ({ ...c, state: "failed", progress: undefined, error: a.error })),
       };
     case "retry":
@@ -142,6 +145,25 @@ function revoke(card: Card) {
 /** How long a leaving row keeps its node so the exit transition can play. */
 const EXIT_MS = 160;
 
+/**
+ * Decodes run through a small pool: `createImageBitmap` holds the full-size bitmap until the
+ * thumbnail is painted, and a drop of thirty phone photos decoded at once is over a gigabyte.
+ */
+const DECODE_SLOTS = 2;
+let decoding = 0;
+const waiting: (() => void)[] = [];
+
+async function withDecodeSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (decoding >= DECODE_SLOTS) await new Promise<void>((r) => waiting.push(r));
+  decoding++;
+  try {
+    return await fn();
+  } finally {
+    decoding--;
+    waiting.shift()?.();
+  }
+}
+
 export type AddOutcome = { added: Card[]; rejected: { notImage: string[]; tooBig: string[]; overCap: number } };
 
 /**
@@ -156,6 +178,8 @@ export type QueueOptions = {
   ensureModel: () => Promise<void>;
   /** Whether `ensureModel` would resolve immediately (skips the loading-model state). */
   modelReady: () => boolean;
+  /** Whether a run holds the main thread (WebAssembly does; WebGPU runs in a worker), so decodes wait for it. */
+  blocksMainThread: () => boolean;
   onDone?: (card: Card, result: RemoveResult) => void;
   onFail?: (card: Card, error: CardError) => void;
   onStart?: (card: Card) => void;
@@ -190,7 +214,7 @@ export function useQueue(opts: QueueOptions) {
   // the browser cannot decode fails here with the "format isn't supported" message.
   const inspect = useCallback(
     (card: Card) => {
-      makeThumb(card.file)
+      withDecodeSlot(() => makeThumb(card.file))
         .then(({ url, width, height }) => {
           if (inQueue(card.id)) dispatch({ type: "thumb", id: card.id, url, width, height });
           else if (url) URL.revokeObjectURL(url);
@@ -225,7 +249,7 @@ export function useQueue(opts: QueueOptions) {
         return;
       }
       if (!alive()) return;
-      inferring.current = true;
+      inferring.current = optsRef.current.blocksMainThread();
       dispatch({ type: "infer", id: card.id });
       // The engine fits the photo to LIMITS.maxEdge itself and reports the size it used.
       const result = await removeBackground(card.file, {
@@ -239,7 +263,7 @@ export function useQueue(opts: QueueOptions) {
       if (!alive()) return;
       dispatch({ type: "done", id: card.id, result, url: URL.createObjectURL(result.blob) });
       optsRef.current.onDone?.(card, result);
-      makeThumb(result.blob)
+      withDecodeSlot(() => makeThumb(result.blob))
         .then(({ url }) => {
           if (!url) return;
           if (inQueue(card.id)) dispatch({ type: "resultThumb", id: card.id, url });
@@ -263,11 +287,13 @@ export function useQueue(opts: QueueOptions) {
   }, [inQueue]);
 
   // The scheduler: whenever no inference is running, decode whatever arrived during the last
-  // one; whenever nothing is in flight, start the first queued card whose dimensions are known
-  // (decode failures never get this far). A card whose state says it is working counts as in
-  // flight even after its promise settled: React can render the `start` update on its own
-  // before the `done`/`fail` that followed it, and the ref alone would let a second job slip
-  // in during that intermediate render.
+  // one; whenever nothing is in flight, start the head of the queue once its dimensions are
+  // known (a decode failure fails the card, so the head never blocks; the `thumb` dispatch
+  // re-runs this). Strict FIFO: the card on the stage must not sit as "queued" while a
+  // smaller one that decoded first is removed. A card whose state says it is working counts
+  // as in flight even after its promise settled: React can render the `start` update on its
+  // own before the `done`/`fail` that followed it, and the ref alone would let a second job
+  // slip in during that intermediate render.
   useEffect(() => {
     if (!inferring.current && pending.current.length) {
       const batch = pending.current;
@@ -277,8 +303,8 @@ export function useQueue(opts: QueueOptions) {
     if (running.current) return;
     if (state.paused) return;
     if (state.cards.some((c) => c.state === "loading-model" || c.state === "removing")) return;
-    const next = state.cards.find((c) => c.state === "queued" && !c.leaving && c.width !== undefined);
-    if (next) void process(next);
+    const first = state.cards.find((c) => c.state === "queued" && !c.leaving);
+    if (first && first.width !== undefined) void process(first);
   }, [state.cards, state.paused, tick, process, inspect]);
 
   const add = useCallback((input: FileList | File[]): AddOutcome => {
@@ -304,7 +330,7 @@ export function useQueue(opts: QueueOptions) {
     }));
     if (cards.length) dispatch({ type: "add", cards });
     // On WebAssembly the inference holds the main thread, so decodes wait for it to settle;
-    // a model download or a WebGPU run leaves the thread free.
+    // a model download or a WebGPU run leaves the thread free (`inferring` is only set then).
     if (inferring.current) pending.current.push(...cards);
     else cards.forEach(inspect);
     return { added: cards, rejected };
@@ -365,21 +391,32 @@ export function useQueue(opts: QueueOptions) {
     };
   }, [cards]);
 
-  /** The card whose model download failed, while it keeps the queue paused. */
-  const modelFailed = useMemo(() => (state.paused ? (cards.find((c) => c.state === "failed" && c.error === "model" && !c.leaving) ?? null) : null), [cards, state.paused]);
+  /** The card whose model download or start failed, while it keeps the queue paused. */
+  const modelFailed = useMemo(() => (state.paused ? (cards.find((c) => c.state === "failed" && isModelError(c.error) && !c.leaving) ?? null) : null), [cards, state.paused]);
 
   return { cards, selectedId: state.selectedId, selected, counts, paused: state.paused, modelFailed, add, select, remove, clear, retry };
 }
 
 export type QueueHandle = ReturnType<typeof useQueue>;
 
+/**
+ * Whether bytes are still in flight. Once they have all landed (at once, from the browser
+ * cache, on every visit after the first) the rest of the loading-model phase is the session
+ * being created, and the copy must not call that a download.
+ */
+export function isDownloading(p: Download | null | undefined): boolean {
+  return !!p && p.total > 0 && p.loaded < p.total;
+}
+
 /** One line of row meta by state, shared by the list, the strip labels and the status line. */
 export function cardStatus(card: Card, waitingForModel: boolean): string {
   switch (card.state) {
     case "queued":
       return waitingForModel ? "waiting for model" : "queued";
-    case "loading-model":
-      return card.progress && card.progress.total > 0 ? `downloading model · ${Math.round((card.progress.loaded / card.progress.total) * 100)}%` : "downloading model";
+    case "loading-model": {
+      const p = card.progress;
+      return p && isDownloading(p) ? `downloading model · ${Math.round((p.loaded / p.total) * 100)}%` : "starting the model";
+    }
     case "removing":
       return "removing…";
     case "failed":

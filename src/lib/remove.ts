@@ -182,6 +182,20 @@ function loadLibrary(): Promise<Library> {
   return import("@imgly/background-removal");
 }
 
+let tail: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs `work` once every earlier run has settled. ORT's WebGPU session refuses overlapping runs
+ * ("Session already started") and the library cannot cancel, so an abandoned job must finish
+ * before the next card's may start; otherwise the two answers cross over in the proxy worker
+ * and the next card gets the wrong mask or a spurious failure.
+ */
+function serial<T>(work: () => Promise<T>): Promise<T> {
+  const next = tail.then(work, work);
+  tail = next.catch(() => {});
+  return next;
+}
+
 /** Settles like `work`, unless the signal fires first, in which case it rejects with AbortError. */
 export function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work;
@@ -375,10 +389,15 @@ async function runOnce(
 
     // The library cannot cancel a running job, so on abort we let it finish in the background and
     // simply refuse to hand the result over. The swallowed catch avoids an unhandled rejection.
+    // Runs are chained (see `serial`), and a card abandoned while it waited never reaches the GPU.
     // The clock starts after preload so the download is excluded and an abandoned job's leftover
     // progress events (the listeners are shared) cannot inflate it.
-    const t0 = performance.now();
-    const work = lib.removeBackground(input.blob, config);
+    let t0 = 0;
+    const work = serial(() => {
+      if (signal?.aborted) return Promise.reject(abortError());
+      t0 = performance.now();
+      return lib.removeBackground(input.blob, config);
+    });
     work.catch(() => {});
     const blob = await withAbort(work, signal);
     if (signal?.aborted) throw abortError();
