@@ -16,7 +16,7 @@ PNG, JPEG, WebP, GIF, BMP and AVIF work, up to 25 MB each (the limits live in `s
 
 ## nothing is uploaded
 
-There is no server side to this beyond serving the page: no API routes, no analytics, no accounts and no cookies. The only requests the app makes on its own are the ones that fetch the model and its runtime from imgly's CDN, once; after that they come from the browser cache.
+The page has no server side beyond serving it: no analytics, no accounts and no cookies. The only requests it makes on its own are the ones that fetch the model and its runtime from imgly's CDN, once; after that they come from the browser cache. The one exception is the [API](#api) below, which is opt-in: nothing on the page calls it.
 
 ## the model
 
@@ -25,6 +25,23 @@ The cut is done by [`@imgly/background-removal`](https://github.com/imgly/backgr
 - The model and runtime are fetched from imgly's CDN (`staticimgly.com`) on the first run and cached by the browser after that: about 105 MB on WebGPU (`isnet_fp16` plus the WebGPU build of the runtime), about 55 MB on WebAssembly (`isnet_quint8` plus the plain build). The hero and the status line quote the figure for the engine in use.
 - On WebGPU the model runs in a worker. On WebAssembly the library runs it on the main thread, so the page pauses for the length of the inference (a few seconds, longer on a phone); the status line says so while it happens.
 - The result is a PNG with a transparent background, at the size the model saw: the original size unless the photo was scaled down first.
+
+## api
+
+The same cut over plain HTTP, for scripts and other apps. No keys, no accounts, nothing stored. Unlike the page, the API runs the model on the server: the photo is uploaded, held in memory for the request, and gone when the response is sent. The full reference lives at `/docs` on a running instance.
+
+```sh
+curl --data-binary @photo.jpg -H 'Content-Type: image/jpeg' https://rmbg.example.com/api/v1/remove -o photo-rmbg.png
+curl -F image=@photo.jpg 'https://rmbg.example.com/api/v1/remove?bg=blur&format=webp' -o photo-rmbg.webp
+```
+
+- `POST /api/v1/remove` takes the photo as the raw body, or as multipart with a field named `image` (or `file`). Options go in the query string (multipart fields work too): `bg` is `transparent` (default), `white`, `black`, a hex colour (`#1e90ff`, with or without the hash) or `blur`; `format` is `png` (default) or `webp`; `download` adds a `Content-Disposition` with `<name>-rmbg.png` (`.webp` for webp), the stem from `?name=` or, without it, the upload's file name.
+- The answer is the image, with `X-Engine: onnxruntime-node`, `X-Duration-Ms` and `X-Image-Size: WxH`. Errors are JSON, `{ "error": { "code", "message" } }`, with the codes `invalid`, `unauthorized`, `too_large`, `unsupported_type`, `rate_limited`, `busy`, `engine` and, for anything else, `internal_error`; curl, wget, httpie and xh (or `?plain`) get one line of text instead. CORS is open, so a browser on any origin can call it.
+- Limits: 12 MB and 40 megapixels per request (413), the same 4,096 px long edge as the page (bigger photos are scaled down first), JPEG, PNG, WebP, GIF, AVIF and TIFF in (anything else is 415), and 10 requests per minute per IP (429 with `Retry-After`). Each process runs two photos at once and queues a few more; past that it answers 503 with `Retry-After: 5`.
+- `GET /api/v1/info` says what an instance takes: limits, backdrops, formats, the rate limit and whether a key is needed.
+- Environment, all optional (see `.env.example`): `API_KEY` locks the API behind `Authorization: Bearer <key>`; `RATE_LIMIT_PER_MIN` changes the limit; `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (or the Vercel `KV_REST_API_*` names) share the limit across instances with a sliding window, otherwise each process counts in memory; `TRUSTED_PROXY_HOPS` for a reverse proxy; `RMBG_MODEL_URL` to fetch the weights from somewhere other than imgly's CDN, and `RMBG_MODEL_SHA256` to pin what that mirror serves.
+- On the server the weights are `isnet_quint8` (44 MB), fetched once from the CDN, checked against the sha256 pinned in `src/lib/config.ts`, and cached under the system temp directory, so a warm instance does not fetch them again. A run takes 2 to 5 s on a typical function; the route asks Vercel for a 60 s cap (`maxDuration`), which every plan allows: 300 s with Fluid Compute (on by default for new projects), 60 s on Hobby without it. On Vercel the platform caps request bodies at 4.5 MB, below the 12 MB the route allows, and answers its own 413 for bigger uploads. The function ships the linux binding plus `libonnxruntime.so.1` (about 45 MB with sharp) via `outputFileTracingIncludes` in `next.config.ts`, well under the 250 MB limit.
+- The CPU runtime needs none of the CUDA libraries `onnxruntime-node`'s postinstall would download, so `package.json` tells pnpm not to run it; with npm, set `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` at install time.
 
 ## run it
 
@@ -37,11 +54,11 @@ pnpm check      # lint, typecheck, build
 pnpm build && pnpm e2e   # production server + headless Chromium smoke test
 ```
 
-The end-to-end script boots the built app on port 3111, screenshots the empty and result states at phone, tablet and desktop widths in both themes, runs one generated image through the model on the WebAssembly path, and checks the cutout's corners are transparent and its centre is opaque. It needs Playwright's Chromium: run `pnpm exec playwright install chromium` once, or point `PLAYWRIGHT_BROWSERS_PATH` at an existing install. Screenshots land in `e2e/screens/` (override with `SHOTS`).
+The end-to-end script boots the built app on port 3111, screenshots the empty and result states at phone, tablet and desktop widths in both themes, runs one generated image through the model on the WebAssembly path, and checks the cutout's border is clear and its centre is opaque. It then screenshots `/docs` at phone and desktop widths, sends the same image through the API in every backdrop and format and checks each error code, and boots a second server on port 3112 with the default rate limit to see the eleventh request get a 429. It needs Playwright's Chromium: run `pnpm exec playwright install chromium` once, or point `PLAYWRIGHT_BROWSERS_PATH` at an existing install. Screenshots land in `e2e/screens/` (override with `SHOTS`).
 
 ## deploy
 
-It is a plain Next.js app. On Vercel: import the repo, build with the defaults, done. No environment variables are needed; `NEXT_PUBLIC_SITE_URL` can be set to pin the origin used for canonical and Open Graph URLs (see `.env.example`).
+It is a plain Next.js app. On Vercel: import the repo, build with the defaults, done. No environment variables are needed; `NEXT_PUBLIC_SITE_URL` can be set to pin the origin used for canonical and Open Graph URLs, and the [API](#api) has a few optional ones of its own (see `.env.example`).
 
 The Content Security Policy in `src/proxy.ts` is deliberately tight. It opens exactly what the model needs: `'wasm-unsafe-eval'` and `'unsafe-eval'` for ONNX Runtime and the library's ndarray dependency, same-origin and `blob:` workers and connections, and `connect-src` to the weights CDN. The runtime's own worker script is a static asset the proxy does not see, so `next.config.ts` gives it a policy of its own.
 
