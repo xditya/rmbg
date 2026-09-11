@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { ArrowLeftRight, Cpu, Zap } from "lucide-react";
 import type { Card } from "@/hooks/use-queue";
 import { cardStatus, isDownloading } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
@@ -194,6 +195,7 @@ function Pill({ side, children }: { side: "left" | "right"; children: string }) 
  */
 function EngineButton({ engine, preference, onToggle }: { engine: Engine; preference: EnginePreference; onToggle: () => void }) {
   const action = preference === "wasm" ? "Back to automatic" : "Switch to WebAssembly";
+  const Icon = engine === "webgpu" ? Zap : Cpu;
   return (
     <button
       type="button"
@@ -202,9 +204,16 @@ function EngineButton({ engine, preference, onToggle }: { engine: Engine; prefer
       title={action}
       aria-label={action}
       onClick={onToggle}
-      className="-mx-1.5 -my-2 shrink-0 rounded px-1.5 py-2 font-mono text-[12px] leading-4 text-fg-faint transition-colors duration-200 ease-quint hover:bg-surface-2 hover:text-fg [@media(pointer:coarse)]:my-0 [@media(pointer:coarse)]:py-3.5"
+      className={cn(
+        // A chip, so it reads as a control and not as a caption: icon, the engine, a swap glyph.
+        "-my-1 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2 font-mono text-[12px] leading-4 text-fg-muted",
+        "transition-[background-color,border-color,color,transform] duration-200 ease-quint hover:border-border-strong hover:bg-surface-2 hover:text-fg active:scale-[.97]",
+        "[@media(pointer:coarse)]:my-0 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:px-3 [@media(pointer:coarse)]:text-[13px]",
+      )}
     >
+      <Icon className="size-3.5 shrink-0" aria-hidden />
       {ENGINE_LABEL[engine]}
+      <ArrowLeftRight className="size-3 shrink-0 text-fg-faint" aria-hidden />
     </button>
   );
 }

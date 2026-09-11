@@ -485,7 +485,16 @@ export function Remover() {
 
           <DropOverlay open={depth > 0} />
           <PhoneBar actions={actions} onMore={() => setMore(true)} moreOpen={more} />
-          <MoreSheet open={more} onClose={() => setMore(false)} card={selected} onDoAnother={openPicker} onRemove={() => removeCard(selected.id)} onClearAll={clearAll} />
+          <MoreSheet
+            open={more}
+            onClose={() => setMore(false)}
+            card={selected}
+            onDoAnother={openPicker}
+            onRemove={() => removeCard(selected.id)}
+            onClearAll={clearAll}
+            enginePreference={engine.preference}
+            onToggleEngine={engine.toggle}
+          />
         </>
       )}
     </div>

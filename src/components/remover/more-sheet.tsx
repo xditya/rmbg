@@ -1,6 +1,7 @@
 "use client";
 
-import { Plus, Trash2, X } from "lucide-react";
+import { Check, Cpu, Plus, Trash2, X } from "lucide-react";
+import type { EnginePreference } from "@/lib/remove";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import type { Card } from "@/hooks/use-queue";
@@ -16,6 +17,8 @@ export function MoreSheet({
   onDoAnother,
   onRemove,
   onClearAll,
+  enginePreference,
+  onToggleEngine,
 }: {
   open: boolean;
   onClose: () => void;
@@ -23,7 +26,10 @@ export function MoreSheet({
   onDoAnother: () => void;
   onRemove: () => void;
   onClearAll: () => void;
+  enginePreference: EnginePreference;
+  onToggleEngine: () => void;
 }) {
+  const wasm = enginePreference === "wasm";
   const run = (fn: () => void) => () => {
     onClose();
     fn();
@@ -42,6 +48,23 @@ export function MoreSheet({
         <button type="button" className={cn(row, "text-fg")} onClick={run(onClearAll)}>
           <Trash2 className="size-4 text-fg-muted" aria-hidden />
           Clear all
+        </button>
+        {/* Stays open: the row is a setting, and the tick shows the state; the notice still confirms it. */}
+        <button type="button" role="switch" aria-checked={wasm} className={cn(row, "h-auto min-h-14 py-2 text-fg")} onClick={onToggleEngine}>
+          <Cpu className="size-4 shrink-0 text-fg-muted" aria-hidden />
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span>Always use WebAssembly</span>
+            <span className="text-[12.5px] text-fg-muted">{wasm ? "On. Slower, but it works on every device." : "Off. WebGPU is used when it gives a good cutout."}</span>
+          </span>
+          <span
+            aria-hidden
+            className={cn(
+              "flex size-6 shrink-0 items-center justify-center rounded-full border transition-colors duration-200 ease-quint",
+              wasm ? "border-accent bg-accent text-accent-fg" : "border-border-strong bg-surface text-transparent",
+            )}
+          >
+            <Check className="size-3.5" strokeWidth={3} />
+          </span>
         </button>
       </div>
       <div className="border-t border-border px-4 py-3">
