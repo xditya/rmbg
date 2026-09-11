@@ -351,7 +351,7 @@ async function withToasts(page, work) {
 const engineButton = (page) =>
   page.evaluate(() => {
     const b = document.querySelector("button[data-engine]");
-    return b ? { label: b.textContent?.trim() ?? "", engine: b.getAttribute("data-engine"), action: b.getAttribute("title"), aria: b.getAttribute("aria-label") } : null;
+    return b ? { label: b.textContent?.trim() ?? "", engine: b.getAttribute("data-engine"), action: b.getAttribute("aria-label"), tooltip: b.getAttribute("title") } : null;
   });
 
 /** Straight RGBA of the cutout on the stage, as a plain array (the page cannot hand a typed array over). */
@@ -425,7 +425,7 @@ async function runModel(browser) {
       return await page.evaluate(() => {
         const t = document.querySelector('nav[aria-label="Photo actions"]');
         const lines = Array.from(document.querySelectorAll("span, p, button[data-engine]")).map((e) => e.textContent?.trim() ?? "");
-        return { title: document.title, status: lines.filter((l) => /downloading|removing|failed|WebAssembly|WebGPU|queued|waiting/i.test(l)).slice(0, 4), bar: !!t };
+        return { title: document.title, status: lines.filter((l) => /downloading|removing|failed|Processor|Graphics chip|queued|waiting/i.test(l)).slice(0, 4), bar: !!t };
       });
     } catch {
       return null;
@@ -504,8 +504,8 @@ async function runModel(browser) {
   check(pixels.ring.mean < 1 && pixels.ring.max <= 64, `border is clear (alpha mean ${pixels.ring.mean.toFixed(2)}, max ${pixels.ring.max})`);
   check(pixels.centre[3] >= 250, `centre is opaque (alpha ${pixels.centre[3]})`);
   // Chromium's software adapter (E2E_WEBGPU) has no shader-f16, so detection must land on WebAssembly there.
-  if (process.env.E2E_WEBGPU) check(pixels.engine === "WebAssembly", `engine label reads WebAssembly on the software adapter (${pixels.engine})`);
-  else check(pixels.engine === "WebAssembly" || pixels.engine === "WebGPU", `engine label shown (${pixels.engine})`);
+  if (process.env.E2E_WEBGPU) check(pixels.engine === "Processor", `engine label reads Processor on the software adapter (${pixels.engine})`);
+  else check(pixels.engine === "Processor" || pixels.engine === "Graphics chip", `engine label shown (${pixels.engine})`);
 
   await engineTogglePass(page, png);
 
@@ -521,15 +521,15 @@ async function runModel(browser) {
 async function engineTogglePass(page, png) {
   const label = (s) => `engine switch: ${s}`;
   const before = await engineButton(page);
-  check(before?.action === "Switch to WebAssembly" && before.aria === before.action, label(`button offers "Switch to WebAssembly" (${before?.action} / ${before?.aria})`));
+  check(before?.action === "Use the processor instead" && !!before.tooltip?.endsWith(`${before.action}.`), label(`button offers "Use the processor instead" and its tooltip explains, then ends with it (${before?.action} / ${before?.tooltip})`));
 
   const { toasts } = await withToasts(page, async () => {
     await page.click("button[data-engine]");
     await sleep(600);
   });
-  check(toasts.includes("The next photo runs on WebAssembly."), label(`press toasts "The next photo runs on WebAssembly." (${JSON.stringify(toasts)})`));
+  check(toasts.includes("The next photo uses your processor. Slower, but it works on every device."), label(`press toasts "The next photo uses your processor…" (${JSON.stringify(toasts)})`));
   const after = await engineButton(page);
-  check(after?.action === "Back to automatic", label(`action flips to "Back to automatic" (${after?.action})`));
+  check(after?.action === "Let it pick the fastest again", label(`action flips to "Let it pick the fastest again" (${after?.action})`));
   const stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
   check(stored === "wasm", label(`localStorage rmbg:engine is "wasm" (${stored})`));
 
@@ -543,17 +543,17 @@ async function engineTogglePass(page, png) {
     return;
   }
   const next = await engineButton(page);
-  check(next?.label === "WebAssembly" && next.engine === "wasm", label(`next photo ran on WebAssembly (${next?.label})`));
-  check(next?.action === "Back to automatic", label(`the choice survived the reload (${next?.action})`));
+  check(next?.label === "Processor" && next.engine === "wasm", label(`next photo ran on the processor (${next?.label})`));
+  check(next?.action === "Let it pick the fastest again", label(`the choice survived the reload (${next?.action})`));
 
   const back = await withToasts(page, async () => {
     await page.click("button[data-engine]");
     await sleep(600);
   });
-  check(back.toasts.includes("The next photo picks the engine automatically."), label(`second press toasts "The next photo picks the engine automatically." (${JSON.stringify(back.toasts)})`));
+  check(back.toasts.includes("The next photo uses your graphics chip when it gives a good cutout."), label(`second press toasts "The next photo uses your graphics chip…" (${JSON.stringify(back.toasts)})`));
   const reset = await engineButton(page);
   const storedBack = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
-  check(reset?.action === "Switch to WebAssembly" && storedBack === "auto", label(`back to automatic (${reset?.action}, stored ${storedBack})`));
+  check(reset?.action === "Use the processor instead" && storedBack === "auto", label(`back to automatic (${reset?.action}, stored ${storedBack})`));
 }
 
 /**
@@ -578,8 +578,8 @@ async function enginePass(browser, maskCheck) {
     return;
   }
   const b = await engineButton(page);
-  check(b?.label === "WebAssembly" && b.engine === "wasm", label(`label reads WebAssembly (${b?.label})`));
-  check(b?.action === "Back to automatic", label(`button offers "Back to automatic" (${b?.action})`));
+  check(b?.label === "Processor" && b.engine === "wasm", label(`label reads Processor (${b?.label})`));
+  check(b?.action === "Let it pick the fastest again", label(`button offers "Let it pick the fastest again" (${b?.action})`));
   const stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
   check(stored === null, label(`nothing persisted to localStorage (${stored})`));
 
@@ -655,9 +655,9 @@ async function gpuSelfCheckPass(browser, png) {
     return;
   }
   console.log(`info webgpu self-check toasts ${JSON.stringify(toasts)}`);
-  check(toasts.includes("WebGPU gave a wrong result on this device, so the model runs on WebAssembly instead."), label("fallback notice names the wrong result"));
+  check(toasts.includes("Your graphics chip gave a wrong cutout, so the model now runs on your processor. Slower, but right."), label("fallback notice names the wrong result"));
   const b = await engineButton(page);
-  check(b?.label === "WebAssembly", label(`label reads WebAssembly after the fallback (${b?.label})`));
+  check(b?.label === "Processor", label(`label reads Processor after the fallback (${b?.label})`));
   // The page ran WebGPU in its frame and closed it on the way to WebAssembly; the frame held the weights.
   const frames = await page.evaluate(() => document.querySelectorAll('iframe[src="/gpu-frame"]').length);
   check(frames === 0, label(`the WebGPU frame is gone after the fallback (${frames} left)`));
@@ -685,8 +685,8 @@ async function gpuSelfCheckPass(browser, png) {
       return false;
     }
   });
-  check(second.result, label("a second photo reaches done state on WebAssembly"));
-  check(!second.toasts.some((t) => /WebGPU/.test(t)), label(`no second notice (${JSON.stringify(second.toasts)})`));
+  check(second.result, label("a second photo reaches done state on the processor"));
+  check(!second.toasts.some((t) => /graphics chip/i.test(t)), label(`no second notice (${JSON.stringify(second.toasts)})`));
   await ctx.close();
 }
 

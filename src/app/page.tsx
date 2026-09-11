@@ -37,7 +37,11 @@ function About() {
         <li>The model finds the subject and cuts the background away, right here in the browser.</li>
         <li>Pick a backdrop and download the PNG, or copy it.</li>
       </ol>
-      <p className="mt-4">If a cutout looks wrong, tap the engine name under the photo to switch to WebAssembly.</p>
+      <p className="mt-4">
+        Under each finished photo you can see what did the cut. <strong className="font-medium text-fg">Graphics chip</strong> is the fast way and is used
+        when your browser and device can do it. <strong className="font-medium text-fg">Processor</strong> is slower, a few seconds a photo, but it works
+        everywhere. If a cutout looks wrong, tap that name and the next photo uses the processor instead; on phones the same switch is in More.
+      </p>
       <p className="mt-4">
         Scripting it? The same cut is one HTTP call away: see{" "}
         <Link href="/docs" className="text-fg underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-fg">

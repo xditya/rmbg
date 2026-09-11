@@ -16,7 +16,10 @@ import type { View } from "./view-switch";
 
 export type Download = { loaded: number; total: number };
 
-const ENGINE_LABEL: Record<Engine, string> = { webgpu: "WebGPU", wasm: "WebAssembly" };
+/** Plain words for the two engines: WebGPU runs on the graphics chip, WebAssembly on the processor. */
+const ENGINE_LABEL: Record<Engine, string> = { webgpu: "Graphics chip", wasm: "Processor" };
+/** What the chip's tooltip says about the engine this photo used. */
+const ENGINE_HINT: Record<Engine, string> = { webgpu: "This photo was cut on your graphics chip, the fast way.", wasm: "This photo was cut on your processor. Slower, but it works on every device." };
 const DOWNSCALE_NOTE = `Photos over ${formatPx(LIMITS.maxEdge)} on the long side are scaled down before the cut.`;
 
 /** The view that can actually be shown: anything but the original needs a finished cutout. */
@@ -48,7 +51,7 @@ export function Stage({
   backdrop: BackdropChoice;
   engine: Engine | null;
   enginePreference: EnginePreference;
-  /** The engine label is a button: auto <-> WebAssembly for the next photo. */
+  /** The engine chip is a button: automatic <-> always the processor, for the next photo. */
   onToggleEngine: () => void;
   /** Bytes loaded so far while the model downloads (the card's own, or the shared preload). */
   download: Download | null;
@@ -194,14 +197,14 @@ function Pill({ side, children }: { side: "left" | "right"; children: string }) 
  * the whole target is really hittable instead of overflowing under the neighbours.
  */
 function EngineButton({ engine, preference, onToggle }: { engine: Engine; preference: EnginePreference; onToggle: () => void }) {
-  const action = preference === "wasm" ? "Back to automatic" : "Switch to WebAssembly";
+  const action = preference === "wasm" ? "Let it pick the fastest again" : "Use the processor instead";
   const Icon = engine === "webgpu" ? Zap : Cpu;
   return (
     <button
       type="button"
       data-engine={engine}
       data-engine-preference={preference}
-      title={action}
+      title={`${ENGINE_HINT[engine]} ${action}.`}
       aria-label={action}
       onClick={onToggle}
       className={cn(

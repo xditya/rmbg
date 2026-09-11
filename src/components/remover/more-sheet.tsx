@@ -53,8 +53,8 @@ export function MoreSheet({
         <button type="button" role="switch" aria-checked={wasm} className={cn(row, "h-auto min-h-14 py-2 text-fg")} onClick={onToggleEngine}>
           <Cpu className="size-4 shrink-0 text-fg-muted" aria-hidden />
           <span className="flex min-w-0 flex-1 flex-col">
-            <span>Always use WebAssembly</span>
-            <span className="text-[12.5px] text-fg-muted">{wasm ? "On. Slower, but it works on every device." : "Off. WebGPU is used when it gives a good cutout."}</span>
+            <span>Always use the processor</span>
+            <span className="text-[12.5px] text-fg-muted">{wasm ? "On. Slower, but the cutout is right on every device." : "Off. Your graphics chip does the cut when it can, which is much faster."}</span>
           </span>
           <span
             aria-hidden

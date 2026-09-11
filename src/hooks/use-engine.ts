@@ -17,13 +17,13 @@ import { useToast } from "@/components/ui/toast";
 export type Download = { loaded: number; total: number };
 
 const FALLBACK_NOTICE = {
-  error: "WebGPU didn't work here, using WebAssembly instead.",
-  "wrong-result": "WebGPU gave a wrong result on this device, so the model runs on WebAssembly instead.",
+  error: "Your graphics chip couldn't run the model, so it runs on your processor instead.",
+  "wrong-result": "Your graphics chip gave a wrong cutout, so the model now runs on your processor. Slower, but right.",
 } as const;
 
 const PREFERENCE_NOTICE: Record<EnginePreference, string> = {
-  wasm: "The next photo runs on WebAssembly.",
-  auto: "The next photo picks the engine automatically.",
+  wasm: "The next photo uses your processor. Slower, but it works on every device.",
+  auto: "The next photo uses your graphics chip when it gives a good cutout.",
 };
 
 /**
