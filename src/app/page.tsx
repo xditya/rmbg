@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Shell } from "@/components/shell";
 import { Remover } from "@/components/remover/remover";
 import { LIMITS, modelDownloadNote, SITE } from "@/lib/config";
@@ -36,6 +37,13 @@ function About() {
         <li>The model finds the subject and cuts the background away, right here in the browser.</li>
         <li>Pick a backdrop and download the PNG, or copy it.</li>
       </ol>
+      <p className="mt-4">
+        Scripting it? The same cut is one HTTP call away: see{" "}
+        <Link href="/docs" className="text-fg underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-fg">
+          the API
+        </Link>
+        . That one runs the model on the server, so the photo is uploaded and held only for the length of the request.
+      </p>
       <p className="mt-6 font-mono text-[12px] text-fg-faint">
         nothing leaves your device · no accounts · no tracking ·{" "}
         <a href={SITE.repo} className="transition-colors hover:text-fg" rel="noopener noreferrer" target="_blank">

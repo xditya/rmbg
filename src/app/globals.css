@@ -164,6 +164,19 @@
   }
 }
 
+/* Code blocks on the docs page: mono, no ligatures, lined-up digits. A component layer rule
+   so per-block utilities (size, leading) still win. */
+@layer components {
+  .code {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    tab-size: 4;
+    font-variant-ligatures: none;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
 /* iOS Safari zooms the page when a focused control is under 16px. */
 @media (pointer: coarse) {
   input,
