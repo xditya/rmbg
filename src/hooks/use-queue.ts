@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LIMITS } from "@/lib/config";
+import { clearInflight, markInflight } from "@/lib/memory";
 import { isTransferError, removeBackground, withAbort, type Engine, type RemoveResult } from "@/lib/remove";
 import { makeThumb } from "@/lib/thumb";
 import { formatBytes } from "@/lib/format";
@@ -170,8 +171,9 @@ function revoke(card: Card) {
 const EXIT_MS = 160;
 
 /**
- * Decodes run through a small pool: `createImageBitmap` holds the full-size bitmap until the
- * thumbnail is painted, and a drop of thirty phone photos decoded at once is over a gigabyte.
+ * Decodes run through a small pool: even decoded straight to thumbnail size (thumb.ts), a
+ * decode holds the compressed file and the decoder's working set, and a drop of thirty phone
+ * photos decoded at once is what makes a phone stall.
  */
 const DECODE_SLOTS = 2;
 let decoding = 0;
@@ -204,6 +206,8 @@ export type QueueOptions = {
   modelReady: () => boolean;
   /** Whether a run holds the main thread (WebAssembly does; WebGPU runs in a worker), so decodes wait for it. */
   blocksMainThread: () => boolean;
+  /** The engine the next job runs on, for the crash guard's mark (null while detection is pending). */
+  currentEngine?: () => Engine | null;
   onDone?: (card: Card, result: RemoveResult) => void;
   onFail?: (card: Card, error: CardError) => void;
   onStart?: (card: Card) => void;
@@ -260,6 +264,8 @@ export function useQueue(opts: QueueOptions) {
     const { ensureModel, modelReady } = optsRef.current;
     try {
       dispatch({ type: "start", id: card.id, state: modelReady() ? "removing" : "loading-model" });
+      // The crash guard: the mark stays until the job settles; a page that reloads with it set ran out of memory (memory.ts).
+      markInflight(optsRef.current.currentEngine?.() ?? null);
       optsRef.current.onStart?.(card);
       try {
         // Racing the signal lets a removed card settle at once; the shared preload carries on.
@@ -275,7 +281,7 @@ export function useQueue(opts: QueueOptions) {
       if (!alive()) return;
       inferring.current = optsRef.current.blocksMainThread();
       dispatch({ type: "infer", id: card.id });
-      // The engine fits the photo to LIMITS.maxEdge itself and reports the size it used.
+      // The engine fits the photo to the visit's max edge itself and reports the size it used.
       const result = await removeBackground(card.file, {
         signal: ctrl.signal,
         onProgress: (p) => {
@@ -306,6 +312,7 @@ export function useQueue(opts: QueueOptions) {
       dispatch({ type: "fail", id: card.id, error: "inference" });
       optsRef.current.onFail?.(card, "inference");
     } finally {
+      clearInflight();
       if (controllers.current.get(card.id) === ctrl) controllers.current.delete(card.id);
       inferring.current = false;
       running.current = null;

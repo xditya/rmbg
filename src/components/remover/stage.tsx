@@ -6,8 +6,9 @@ import { cardStatus, isDownloading } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
 import type { Engine } from "@/lib/remove";
 import { backdropColor, blurRadius, type BackdropChoice } from "@/lib/backdrop";
-import { LIMITS, modelDownloadNote } from "@/lib/config";
+import { modelDownloadNote } from "@/lib/config";
 import { formatDims, formatMB, formatMs, formatPx } from "@/lib/format";
+import { lowMemory, maxEdge } from "@/lib/memory";
 import { cn } from "@/lib/cn";
 import { Compare } from "./compare";
 import { ModelProgress } from "./model-progress";
@@ -19,7 +20,8 @@ export type Download = { loaded: number; total: number };
 const ENGINE_LABEL: Record<Engine, string> = { webgpu: "Graphics chip", wasm: "Processor" };
 /** The caption's tooltip: what the engine that cut this photo is, in a sentence. */
 const ENGINE_HINT: Record<Engine, string> = { webgpu: "Cut on your graphics chip, the fast way.", wasm: "Cut on your processor. Slower, but it works on every device." };
-const DOWNSCALE_NOTE = `Photos over ${formatPx(LIMITS.maxEdge)} on the long side are scaled down before the cut.`;
+/** The caption's tooltip on a scaled photo; the smaller edge of a low-memory visit says so (memory.ts). */
+const downscaleNote = () => `Photos over ${formatPx(maxEdge())} on the long side are scaled down before the cut${lowMemory() ? " for this visit" : ""}.`;
 
 /** The view that can actually be shown: anything but the original needs a finished cutout. */
 export function effectiveView(card: Card | null, view: View): View {
@@ -234,7 +236,7 @@ export function StatusLine({
       const scaled = src && out && src !== out;
       const dims = scaled ? `${src} → ${out}` : out || src;
       right = [withName ? card.name : "", dims, card.ms !== undefined ? formatMs(card.ms) : ""].filter(Boolean).join(" · ");
-      if (scaled) title = DOWNSCALE_NOTE;
+      if (scaled) title = downscaleNote();
       break;
     }
   }

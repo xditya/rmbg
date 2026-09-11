@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useEngine } from "@/hooks/use-engine";
@@ -9,8 +9,9 @@ import { useClientFact } from "@/hooks/use-media";
 import { isDownloading, useQueue } from "@/hooks/use-queue";
 import { TRANSPARENT, type BackdropChoice } from "@/lib/backdrop";
 import type { EnginePreference } from "@/lib/remove";
-import { LIMITS, SITE } from "@/lib/config";
-import { formatBytes, formatDims, formatMs, formatWholeMB } from "@/lib/format";
+import { LIMITS, LOW_MEMORY_EDGE, SITE } from "@/lib/config";
+import { formatBytes, formatDims, formatMs, formatPx, formatWholeMB } from "@/lib/format";
+import { clearInflight, crashedRun, dismissCrash, markInflight, subscribeCrash } from "@/lib/memory";
 import { cn } from "@/lib/cn";
 import { ActionButtons, PhoneBar, useActions } from "./action-bar";
 import { BackgroundPicker } from "./background-picker";
@@ -18,7 +19,7 @@ import { DropOverlay } from "./drop-overlay";
 import { Dropzone } from "./dropzone";
 import { canRedo, EnginePicker } from "./engine-picker";
 import { MoreSheet } from "./more-sheet";
-import { Notice } from "./notice";
+import { InfoNotice, Notice } from "./notice";
 import { Queue } from "./queue";
 import { effectiveView, Stage, StatusLine } from "./stage";
 import { ViewSwitch, type View } from "./view-switch";
@@ -38,6 +39,10 @@ const ENGINE_ANNOUNCE: Record<EnginePreference, string> = { wasm: "Engine: proce
 
 /** How long a leaving row keeps its node (see use-queue); focus is checked again once it is gone. */
 const EXIT_MS = 160;
+
+/** What the crash guard says (memory.ts): the last document went away mid-run, so this visit works smaller. */
+const LOW_MEMORY_NOTE = `The page reloaded while cutting the last photo, which usually means it ran out of memory. Photos are now scaled to ${formatPx(LOW_MEMORY_EDGE)} before the cut for this visit.`;
+const LOW_MEMORY_AGAIN = "If it keeps happening, pick Processor only under engine.";
 
 /** Focuses the first match that is actually rendered: the phone controls and the desktop column both carry a view switch. */
 function focusVisible(root: HTMLElement | null, selector: string): void {
@@ -102,6 +107,7 @@ export function Remover() {
     modelReady: engine.isReady,
     // Right after a WebGPU fallback too: `noteResult` has reported the engine by then.
     blocksMainThread: () => engine.engine !== "webgpu",
+    currentEngine: () => engine.engine,
     onStart: (card) => announce(`Removing the background from ${card.name}`),
     onDone: (card, result) => {
       engine.noteResult(result.engine);
@@ -221,6 +227,31 @@ export function Remover() {
   );
 
   const actions = useActions(selected, backdrop);
+
+  // The crash guard: a mark left by the last document means it went away mid-run (a phone
+  // out of memory reloads the page blank); this visit works at a smaller size and says so.
+  // A deliberate leave takes the mark with it; a page back from the cache mid-run restores it.
+  const crash = useSyncExternalStore(subscribeCrash, crashedRun, () => null);
+  const memoryNote = crash ? (crash.repeat ? `${LOW_MEMORY_NOTE} ${LOW_MEMORY_AGAIN}` : LOW_MEMORY_NOTE) : null;
+  const busy = counts.loading || counts.removing;
+  const busyRef = useRef(busy);
+  const engineRef = useRef(engine.engine);
+  useEffect(() => {
+    busyRef.current = busy;
+    engineRef.current = engine.engine;
+  }, [busy, engine.engine]);
+  useEffect(() => {
+    const onHide = () => clearInflight();
+    const onShow = (e: PageTransitionEvent) => {
+      if (e.persisted && busyRef.current) markInflight(engineRef.current);
+    };
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("pageshow", onShow);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("pageshow", onShow);
+    };
+  }, []);
 
   // Input modality, tracked once so focus is only moved for keyboard users.
   useEffect(() => {
@@ -405,12 +436,16 @@ export function Remover() {
       </div>
 
       {empty || !selected ? (
-        <Dropzone over={depth > 0} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} pickRef={heroPick} />
+        <>
+          {memoryNote && <InfoNotice message={memoryNote} onDismiss={dismissCrash} className="mb-3 max-sm:mx-4 max-sm:mt-3" />}
+          <Dropzone over={depth > 0} mac={mac} engine={engine.engine} onPick={openPicker} onSnap={openCamera} onIntent={intent} pickRef={heroPick} />
+        </>
       ) : (
         <>
           {/* The hero's heading leaves with it; heading navigation still needs one for the tool. */}
           <h1 className="sr-only">{SITE.tagline}</h1>
           <div className="flex min-w-0 flex-1 flex-col animate-fade-in">
+            {memoryNote && <InfoNotice message={memoryNote} onDismiss={dismissCrash} className="mb-3 max-sm:mx-4 max-sm:mb-2 max-sm:mt-3" />}
             <Stage
               card={selected}
               view={view}

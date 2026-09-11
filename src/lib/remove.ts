@@ -6,8 +6,11 @@
  */
 
 import type { Config } from "@imgly/background-removal";
-import { GPU_FRAME_PATH, LIMITS, MODEL_FILES } from "@/lib/config";
+import { GPU_FRAME_PATH, MODEL_BASE_URL, MODEL_CACHE_NAME, MODEL_FILES, type ModelStatus } from "@/lib/config";
+import { decodeFull, decodeScaled, loadImageMeta, UNSUPPORTED_FORMAT_MESSAGE } from "@/lib/decode";
 import { maskLooksSane } from "@/lib/mask-check";
+import { maxEdge } from "@/lib/memory";
+import { modelCacheReady, requestPersistentStorage } from "@/lib/model-cache";
 
 /** Which backend ONNX Runtime ended up on. */
 export type Engine = "webgpu" | "wasm";
@@ -36,8 +39,7 @@ export type Backdrop = { kind: "transparent" } | { kind: "color"; hex: string } 
  * Errors
  * ---------------------------------------------------------------------------------------------- */
 
-/** Shown when the browser cannot decode a file (HEIC on iOS Safari, exotic AVIF, corrupt data). */
-export const UNSUPPORTED_FORMAT_MESSAGE = "This format isn't supported by your browser. Try a JPEG or PNG.";
+export { loadImageMeta, UNSUPPORTED_FORMAT_MESSAGE };
 
 function abortError(): DOMException {
   return new DOMException("Aborted", "AbortError");
@@ -194,6 +196,8 @@ let attempt = 0;
 
 export function libraryConfig(engine: Engine): Config {
   return {
+    // The CDN or the mirror `NEXT_PUBLIC_MODEL_URL` names; the service worker caches what comes from here.
+    publicPath: MODEL_BASE_URL,
     device: engine === "webgpu" ? "gpu" : "cpu",
     model: engine === "webgpu" ? "isnet_fp16" : "isnet_quint8",
     // Only honoured on WebGPU: the library runs the WebAssembly session on the main thread, so
@@ -206,14 +210,109 @@ export function libraryConfig(engine: Engine): Config {
   };
 }
 
-/** `lib.preload` that makes the next try a real one when this one fails. */
+/** `lib.preload` that makes the next try a real one when this one fails. Waits for the model cache to take the page first. */
 export async function initLibrary(lib: Library, config: Config): Promise<void> {
+  await modelCacheReady();
   try {
     await lib.preload(config);
   } catch (error) {
     attempt++;
     throw error;
   }
+  notifyModelLoaded(config.device === "gpu" ? "webgpu" : "wasm");
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * The model on the device
+ * ---------------------------------------------------------------------------------------------- */
+
+const loadedListeners = new Set<() => void>();
+
+/** Called the first time each engine's model comes up, on the page or relayed from the frame: the picker's badges refresh. */
+export function subscribeModelLoaded(listener: () => void): () => void {
+  loadedListeners.add(listener);
+  return () => {
+    loadedListeners.delete(listener);
+  };
+}
+
+/** The engines whose model has come up in this document. `initLibrary` runs on every WebAssembly job; the badges only need to hear once. */
+const notified = new Set<Engine>();
+
+/** A model is resident: ask the browser to keep the cache, and tell whoever shows the badges. Once per engine. */
+function notifyModelLoaded(engine: Engine): void {
+  if (notified.has(engine)) return;
+  notified.add(engine);
+  requestPersistentStorage();
+  for (const listener of loadedListeners) listener();
+}
+
+type Manifest = Record<string, { chunks?: { name: string }[] } | undefined>;
+
+const MANIFEST_URL = `${MODEL_BASE_URL}resources.json`;
+
+let manifestFetch: Promise<Manifest | null> | undefined;
+
+/**
+ * The manifest, from the worker's cache first: the library fetched it through the worker
+ * before any chunk, so once anything is downloaded the badges never contact the CDN. Before
+ * that it is fetched once per document (through the worker, which keeps it); null when it
+ * cannot be read, and the next call tries again.
+ */
+async function readManifest(cache: Cache): Promise<Manifest | null> {
+  const cached = await cache.match(MANIFEST_URL);
+  if (cached) return (await cached.json()) as Manifest;
+  manifestFetch ??= fetch(MANIFEST_URL)
+    .then((response) => (response.ok ? (response.json() as Promise<Manifest>) : null))
+    .catch(() => null);
+  const manifest = await manifestFetch;
+  if (!manifest) manifestFetch = undefined;
+  return manifest;
+}
+
+export type ModelStatuses = Record<Engine, ModelStatus>;
+
+const UNKNOWN_STATUSES: ModelStatuses = { webgpu: "unknown", wasm: "unknown" };
+
+let statusesInFlight: Promise<ModelStatuses> | undefined;
+
+/**
+ * Whether every file each engine needs (its model and its build of the runtime, the keys of
+ * `MODEL_FILES`) is in the service worker's cache. One manifest read serves both engines,
+ * and callers that ask at the same time (the two pickers of the desktop layout) share one
+ * pass over the cache. "unknown" when the Cache API is missing (an insecure origin, an old
+ * browser) or the manifest cannot be read.
+ */
+export function modelStatuses(): Promise<ModelStatuses> {
+  if (typeof caches === "undefined") return Promise.resolve(UNKNOWN_STATUSES);
+  statusesInFlight ??= (async () => {
+    try {
+      const cache = await caches.open(MODEL_CACHE_NAME);
+      const manifest = await readManifest(cache);
+      if (!manifest) return UNKNOWN_STATUSES;
+      const status = async (engine: Engine): Promise<ModelStatus> => {
+        for (const key of Object.keys(MODEL_FILES[engine])) {
+          const chunks = manifest[key]?.chunks;
+          if (!chunks?.length) return "unknown";
+          for (const chunk of chunks) {
+            if (!(await cache.match(`${MODEL_BASE_URL}${chunk.name}`))) return "missing";
+          }
+        }
+        return "downloaded";
+      };
+      return { webgpu: await status("webgpu"), wasm: await status("wasm") };
+    } catch {
+      return UNKNOWN_STATUSES;
+    } finally {
+      statusesInFlight = undefined;
+    }
+  })();
+  return statusesInFlight;
+}
+
+/** One engine's entry of `modelStatuses`. */
+export async function modelStatus(engine: Engine): Promise<ModelStatus> {
+  return (await modelStatuses())[engine];
 }
 
 /**
@@ -366,15 +465,6 @@ function toPng(canvas: OffscreenCanvas | HTMLCanvasElement): Promise<Blob> {
   });
 }
 
-/** Decodes a Blob to a bitmap, honouring EXIF orientation. Rejects with the friendly message. */
-async function decode(file: Blob): Promise<ImageBitmap> {
-  try {
-    return await createImageBitmap(file, { imageOrientation: "from-image" });
-  } catch {
-    throw new Error(UNSUPPORTED_FORMAT_MESSAGE);
-  }
-}
-
 /**
  * The library decodes PNG, JPEG and WebP itself; everything else (GIF, BMP, AVIF, files with
  * no type) throws inside it, so those are handed over as PNG from the bitmap we already have.
@@ -382,20 +472,22 @@ async function decode(file: Blob): Promise<ImageBitmap> {
 const PASSTHROUGH = /^image\/(png|jpe?g|webp)$/i;
 
 /**
- * Decodes, downscales when needed, re-encodes formats the library cannot read, and reports the
- * resulting pixel size. Closes its bitmap. An animated GIF yields its first frame, which is
- * the frame the cutout should come from.
+ * Downscales when needed, re-encodes formats the library cannot read, and reports the
+ * resulting pixel size. A photo the library can read at a size it may see is passed through
+ * without a decode; anything else is decoded straight to its fitted size (see decode.ts),
+ * so no full-size bitmap exists here. An animated GIF yields its first frame, which is the
+ * frame the cutout should come from.
  */
-async function fit(file: Blob, maxEdge: number): Promise<{ blob: Blob; width: number; height: number }> {
-  const bitmap = await decode(file);
-  try {
-    const { width, height } = bitmap;
-    const longest = Math.max(width, height);
-    if (longest <= maxEdge && PASSTHROUGH.test(file.type)) return { blob: file, width, height };
+async function fit(file: Blob, edge: number): Promise<{ blob: Blob; width: number; height: number }> {
+  const { width, height } = await loadImageMeta(file);
+  const longest = Math.max(width, height);
+  if (longest <= edge && PASSTHROUGH.test(file.type)) return { blob: file, width, height };
 
-    const scale = Math.min(1, maxEdge / longest);
-    const w = Math.max(1, Math.round(width * scale));
-    const h = Math.max(1, Math.round(height * scale));
+  const scale = Math.min(1, edge / longest);
+  const w = Math.max(1, Math.round(width * scale));
+  const h = Math.max(1, Math.round(height * scale));
+  const bitmap = await decodeScaled(file, w, h, "high");
+  try {
     const { canvas, ctx } = makeSurface(w, h);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
@@ -407,25 +499,13 @@ async function fit(file: Blob, maxEdge: number): Promise<{ blob: Blob; width: nu
 }
 
 /**
- * Reads pixel dimensions. Rejects with a friendly Error when the browser can't decode the format.
- * The queue reads size from its thumbnail decode instead; kept for callers that only need this.
+ * Re-encodes to PNG when the longest edge exceeds the edge (the site limit, or the smaller
+ * one of a low-memory visit, see `maxEdge` in memory.ts) or the format is one the library
+ * cannot decode; returns the same Blob otherwise. `removeBackground` does this itself, so
+ * only call it when the fitted Blob is needed on its own.
  */
-export async function loadImageMeta(file: Blob): Promise<{ width: number; height: number }> {
-  const bitmap = await decode(file);
-  try {
-    return { width: bitmap.width, height: bitmap.height };
-  } finally {
-    bitmap.close();
-  }
-}
-
-/**
- * Re-encodes to PNG when the longest edge exceeds maxEdge or the format is one the library
- * cannot decode; returns the same Blob otherwise. `removeBackground` does this itself, so only
- * call it when the fitted Blob is needed on its own.
- */
-export async function downscaleIfNeeded(file: Blob, maxEdge: number): Promise<Blob> {
-  const { blob } = await fit(file, maxEdge);
+export async function downscaleIfNeeded(file: Blob, edge = maxEdge()): Promise<Blob> {
+  const { blob } = await fit(file, edge);
   return blob;
 }
 
@@ -447,7 +527,7 @@ export async function removeBackground(
   if (signal?.aborted) throw abortError();
 
   const lib = await loadLibrary();
-  const input = await fit(file, LIMITS.maxEdge);
+  const input = await fit(file, maxEdge());
   if (signal?.aborted) throw abortError();
 
   const engine = await resolveEngine();
@@ -754,6 +834,8 @@ function verifyGpuOnce(): Promise<void> {
     selfCheck = (async () => {
       const frame = await gpuFrame();
       await frame.preload();
+      // The frame's own `initLibrary` told its document, not this one.
+      notifyModelLoaded("webgpu");
       const picture = await drawSelfCheckImage();
       const out = await frame.run(picture, { quiet: true });
       const { data, width, height } = await readRgba(out);
@@ -778,7 +860,7 @@ function verifyGpuOnce(): Promise<void> {
 
 /** Paints the cutout over the chosen backdrop (transparent, a flat colour, or the blurred original) and returns a PNG. */
 export async function composeBackdrop(cutout: Blob, original: Blob, backdrop: Backdrop): Promise<Blob> {
-  const fg = await decode(cutout);
+  const fg = await decodeFull(cutout);
   try {
     const { width, height } = fg;
     const { canvas, ctx } = makeSurface(width, height);
@@ -787,7 +869,8 @@ export async function composeBackdrop(cutout: Blob, original: Blob, backdrop: Ba
       ctx.fillStyle = backdrop.hex;
       ctx.fillRect(0, 0, width, height);
     } else if (backdrop.kind === "blur") {
-      const bg = await decode(original);
+      // At the cutout's size, not the original's: it is blurred anyway, and a phone photo decoded whole is tens of MB.
+      const bg = await decodeScaled(original, width, height, "high");
       try {
         drawBlurred(ctx, bg, width, height, backdrop.radius);
       } finally {
