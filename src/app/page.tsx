@@ -29,7 +29,7 @@ function About() {
         rmbg cuts the subject out of a photo and gives you a PNG with a transparent, plain or blurred backdrop. Drop one photo or thirty; each one is done on your
         device by a model that runs in the browser, so nothing is sent anywhere. PNG, JPEG, WebP, GIF, BMP and AVIF work, up to {formatWholeMB(LIMITS.maxBytes)} each;
         photos over {formatPx(LIMITS.maxEdge)} on the long side are scaled down first. The model is {modelDownloadNote(null)} depending on your browser and downloads
-        once.
+        once. Both models stay on your device once downloaded, so switching engines needs one more download the first time and none after that.
       </p>
       <h2 className="mb-1 mt-6 font-mono text-[12px] text-fg-faint">how it works</h2>
       <ol className="list-decimal space-y-1 pl-5">

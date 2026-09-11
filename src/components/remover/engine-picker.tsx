@@ -1,17 +1,23 @@
 "use client";
 
-import { useId, type KeyboardEvent } from "react";
+import { useEffect, useId, useState, type KeyboardEvent } from "react";
 import { Check, Cpu, RotateCcw, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { sheetRow } from "@/components/ui/dialog";
 import type { Card } from "@/hooks/use-queue";
-import type { Engine, EnginePreference } from "@/lib/remove";
+import { modelCacheNote, type ModelStatus } from "@/lib/config";
+import { modelStatuses, subscribeModelLoaded, type Engine, type EnginePreference, type ModelStatuses } from "@/lib/remove";
 import { cn } from "@/lib/cn";
 
-/** The two choices, in plain words: WebGPU is "the graphics chip", WebAssembly "the processor". */
-const OPTIONS: { key: EnginePreference; label: string; icon: typeof Zap; description: string; hint: string }[] = [
+/**
+ * The two choices, in plain words: WebGPU is "the graphics chip", WebAssembly "the processor".
+ * `model` is the engine whose files the option's badge describes: "Automatic" stands for the
+ * graphics-chip model even on a device that resolves it to the processor.
+ */
+const OPTIONS: { key: EnginePreference; model: Engine; label: string; icon: typeof Zap; description: string; hint: string }[] = [
   {
     key: "auto",
+    model: "webgpu",
     label: "Automatic",
     icon: Zap,
     description: "Graphics chip when your device can do it, the fast way. Otherwise the processor.",
@@ -19,12 +25,50 @@ const OPTIONS: { key: EnginePreference; label: string; icon: typeof Zap; descrip
   },
   {
     key: "wasm",
+    model: "wasm",
     label: "Processor only",
     icon: Cpu,
     description: "Slower, a few seconds a photo, but the cutout is right on every device.",
     hint: "Slower, but the cutout is right on every device.",
   },
 ];
+
+const UNKNOWN: ModelStatuses = { webgpu: "unknown", wasm: "unknown" };
+
+/**
+ * Whether each engine's files are on the device (the service worker's cache), read when the
+ * picker becomes active (mount, or the sheet opening) and again the first time a model
+ * finishes loading on each engine, so the badge flips to "Downloaded" as it happens. One
+ * read covers both options, from the cache alone once anything has been downloaded.
+ */
+function useModelStatuses(active: boolean): ModelStatuses {
+  const [statuses, setStatuses] = useState<ModelStatuses>(UNKNOWN);
+  useEffect(() => {
+    if (!active) return;
+    let live = true;
+    const refresh = () => {
+      void modelStatuses().then((next) => {
+        if (live) setStatuses(next);
+      });
+    };
+    refresh();
+    const stop = subscribeModelLoaded(refresh);
+    return () => {
+      live = false;
+      stop();
+    };
+  }, [active]);
+  return statuses;
+}
+
+/** The trailing mono fragment of an option's description: "Downloaded", or the size it would download. */
+function Badge({ engine, status }: { engine: Engine; status: ModelStatus }) {
+  return (
+    <span className="font-mono text-[11.5px] text-fg-faint" data-model-status={status}>
+      {modelCacheNote(engine, status)}
+    </span>
+  );
+}
 
 const SHIFT: Record<EnginePreference, string> = { auto: "translate-x-0", wasm: "translate-x-full" };
 
@@ -53,6 +97,7 @@ export function EnginePicker({
   onChange,
   onRedo,
   inline,
+  active = true,
   className,
 }: {
   shape: "list" | "segmented";
@@ -60,9 +105,12 @@ export function EnginePicker({
   onChange: (next: EnginePreference) => void;
   onRedo?: (() => void) | null;
   inline?: boolean;
+  /** Whether the picker is on screen (a sheet passes its open state); the badges are read while it is. */
+  active?: boolean;
   className?: string;
 }) {
   const labelId = useId();
+  const statuses = useModelStatuses(active);
 
   // Arrows move the choice, like the view switch; the roving tabindex keeps one tab stop.
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -100,7 +148,9 @@ export function EnginePicker({
                 <o.icon className="size-4 shrink-0 text-fg-muted" aria-hidden />
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span>{o.label}</span>
-                  <span className="text-[12.5px] leading-snug text-fg-muted">{o.description}</span>
+                  <span className="text-[12.5px] leading-snug text-fg-muted">
+                    <span data-engine-hint>{o.description}</span> <Badge engine={o.model} status={statuses[o.model]} />
+                  </span>
                 </span>
                 <span
                   aria-hidden
@@ -167,7 +217,9 @@ export function EnginePicker({
           );
         })}
       </div>
-      <p className={cn("text-[12.5px] leading-snug text-fg-muted", inline ? "min-w-0" : "mt-1.5")}>{current.hint}</p>
+      <p className={cn("text-[12.5px] leading-snug text-fg-muted", inline ? "min-w-0" : "mt-1.5")}>
+        <span data-engine-hint>{current.hint}</span> <Badge engine={current.model} status={statuses[current.model]} />
+      </p>
       {onRedo && (
         <Button size="sm" className={cn("self-start", inline ? "[@media(pointer:coarse)]:h-11" : "mt-2")} onClick={onRedo}>
           <RotateCcw className="size-3.5" aria-hidden />

@@ -30,13 +30,55 @@ export const LIMITS = {
  */
 export const GPU_FRAME_PATH = "/gpu-frame";
 
+/** imgly's CDN, the directory with `resources.json` and the content-addressed chunks of the weights and the runtime. */
+const MODEL_CDN_URL = "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/";
+
+const withSlash = (url: string) => (url.endsWith("/") ? url : `${url}/`);
+
+/**
+ * `NEXT_PUBLIC_MODEL_URL` checked: an absolute http(s) URL or nothing. Anything else (a host
+ * without a scheme, a typo) fails here, at build time, with a message that names the value,
+ * instead of every page answering 500 once the proxy tries to read its origin.
+ */
+function modelBaseUrl(): string {
+  const given = process.env.NEXT_PUBLIC_MODEL_URL?.trim();
+  if (!given) return MODEL_CDN_URL;
+  let url: URL | null = null;
+  try {
+    url = new URL(given);
+  } catch {
+    /* reported below */
+  }
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    throw new Error(`NEXT_PUBLIC_MODEL_URL must be an absolute http(s) URL, the directory with resources.json and the chunks (got "${given}")`);
+  }
+  return withSlash(url.href);
+}
+
+/**
+ * Where the browser fetches the weights and the runtime: `NEXT_PUBLIC_MODEL_URL` (a mirror with
+ * the CDN's layout; inlined at build time, so it needs a rebuild to change), else the CDN. The
+ * library's `publicPath`, the service worker's allowlist (`public/sw.js`, told at registration)
+ * and the CSP's `connect-src` all read this one value. The API has its own (`RMBG_MODEL_URL`).
+ */
+export const MODEL_BASE_URL = modelBaseUrl();
+
+/** The origin of `MODEL_BASE_URL`, for the CSP's `connect-src`. */
+export const MODEL_ORIGIN = new URL(MODEL_BASE_URL).origin;
+
+/** The Cache Storage bucket the service worker keeps the chunks in. Bump the suffix to drop old ones on activate. */
+export const MODEL_CACHE_NAME = "rmbg-models-v1";
+
+/** The long edge photos are fitted to for the rest of the visit once the page has run out of memory mid-cut (`src/lib/memory.ts`). */
+export const LOW_MEMORY_EDGE = 2048;
+
 /** The HTTP API (`/api/v1`). The engine runs on the server with the WebAssembly-path weights. */
 export const API = {
   path: "/api/v1/remove",
   engine: "onnxruntime-node",
   model: "isnet_quint8",
   /** Where the weights come from unless `RMBG_MODEL_URL` says otherwise. Same CDN and version the browser uses. */
-  modelBaseUrl: "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/",
+  modelBaseUrl: MODEL_CDN_URL,
   /** The assembled `isnet_quint8.onnx` from that CDN (`MODEL_FILES.wasm` has the same size); anything else is refused. */
   modelBytes: 44_348_940,
   modelSha256: "d1ca3535c21b53d08fa3b640e5949389f82e764f6376a0502d44982c35cae482",
@@ -82,4 +124,14 @@ const roundMB = (bytes: number) => Math.round(bytes / (1024 * 1024) / 5) * 5;
 export function modelDownloadNote(engine: Engine | null): string {
   if (engine) return `about ${roundMB(modelDownloadBytes(engine))} MB`;
   return `${roundMB(modelDownloadBytes("wasm"))} to ${roundMB(modelDownloadBytes("webgpu"))} MB`;
+}
+
+/** Whether an engine's files are in the service worker's cache; "unknown" where the Cache API is missing or the manifest could not be read. */
+export type ModelStatus = "downloaded" | "missing" | "unknown";
+
+/** The picker's badge for an engine: "Downloaded", "About 105 MB, downloads once", or the bare size when the cache cannot be read. */
+export function modelCacheNote(engine: Engine, status: ModelStatus): string {
+  if (status === "downloaded") return "Downloaded";
+  const size = `About ${roundMB(modelDownloadBytes(engine))} MB`;
+  return status === "missing" ? `${size}, downloads once` : size;
 }

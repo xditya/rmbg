@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
 import { SITE } from "@/lib/config";
+import { ModelCache } from "@/components/model-cache";
 import { ThemeScript } from "@/components/theme-script";
 import { ToastProvider } from "@/components/ui/toast";
 import "./globals.css";
@@ -41,6 +42,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       </head>
       <body className="flex min-h-full flex-col">
         <ToastProvider>{children}</ToastProvider>
+        <ModelCache />
       </body>
     </html>
   );

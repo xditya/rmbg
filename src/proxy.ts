@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { GPU_FRAME_PATH } from "@/lib/config";
+import { GPU_FRAME_PATH, MODEL_ORIGIN } from "@/lib/config";
 
 /**
  * Security headers and a nonce-based Content Security Policy for every page response.
@@ -8,17 +8,18 @@ import { GPU_FRAME_PATH } from "@/lib/config";
  * own policy is set in next.config.ts since this proxy skips static assets) plus blob: thread
  * workers, it loads its own .wasm binary through fetch() from a blob: URL it minted itself
  * (so connect-src needs blob:), the library's ndarray dependency needs 'unsafe-eval', and the
- * weights are fetched from imgly's CDN. Those are the only holes in the policy. No other
- * origin is ever contacted. Nothing may frame the site except the site itself framing its
- * own WebGPU route (`GPU_FRAME_PATH`), which the page opens hidden to run the model in.
+ * weights are fetched from imgly's CDN (or the mirror `NEXT_PUBLIC_MODEL_URL` names). Those
+ * are the only holes in the policy. No other origin is ever contacted. Nothing may frame the
+ * site except the site itself framing its own WebGPU route (`GPU_FRAME_PATH`), which the page
+ * opens hidden to run the model in. The service worker that caches the weights (public/sw.js)
+ * is a same-origin script, which `worker-src 'self'` already allows; it gets this same policy
+ * on its own response, and its fetches to the weights origin fall under the same connect-src.
  */
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Permissions-Policy": "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
 };
-
-const MODEL_CDN = "https://staticimgly.com";
 
 export function proxy(request: NextRequest) {
   const isDev = process.env.NODE_ENV === "development";
@@ -35,7 +36,7 @@ export function proxy(request: NextRequest) {
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
     // blob: because onnxruntime-web fetches its wasm binary from an in-page blob URL.
-    `connect-src 'self' blob: ${MODEL_CDN}`,
+    `connect-src 'self' blob: ${MODEL_ORIGIN}`,
     "worker-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",

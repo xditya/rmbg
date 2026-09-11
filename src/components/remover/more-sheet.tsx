@@ -51,7 +51,7 @@ export function MoreSheet({
           Clear all
         </button>
         {/* A setting, so choosing keeps the sheet open; Redo is an action and closes it, the stage shows the progress. */}
-        <EnginePicker shape="list" value={enginePreference} onChange={onChooseEngine} onRedo={onRedo && run(onRedo)} />
+        <EnginePicker shape="list" active={open} value={enginePreference} onChange={onChooseEngine} onRedo={onRedo && run(onRedo)} />
       </div>
       <div className="border-t border-border px-4 py-3">
         <Button size="lg" className="w-full" onClick={onClose}>

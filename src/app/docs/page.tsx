@@ -226,7 +226,9 @@ done`}</Code>
         <P>
           It is a plain Next.js app; the API is a route in it. Every variable is optional. The model weights (44 MB) are fetched once from imgly&apos;s CDN on the
           first request, checked against a pinned sha256, and cached under the system temp directory, so a warm instance answers in seconds. A mirror is
-          checked chunk by chunk against its own manifest, and against <Mono>RMBG_MODEL_SHA256</Mono> when that is set.
+          checked chunk by chunk against its own manifest, and against <Mono>RMBG_MODEL_SHA256</Mono> when that is set. The page fetches its own copy of
+          the weights in the browser, from the CDN or from <Mono>NEXT_PUBLIC_MODEL_URL</Mono>, a mirror with the CDN&apos;s layout served with CORS; that
+          one is inlined at build time, so it takes a rebuild to change.
         </P>
         <Code>{`API_KEY=                 lock the API: requests then need Authorization: Bearer <key>
 RATE_LIMIT_PER_MIN=10    requests per minute per IP
@@ -236,6 +238,7 @@ UPSTASH_REDIS_REST_TOKEN=
 TRUSTED_PROXY_HOPS=1     proxies in front of the app that append X-Forwarded-For; 0 on Vercel, 1 elsewhere by default
 RMBG_MODEL_URL=          base URL for the weights (a mirror, or an air-gapped copy of the CDN layout)
 RMBG_MODEL_SHA256=       with a mirror, the sha256 the assembled model must hash to; the CDN's file is pinned in config
+NEXT_PUBLIC_MODEL_URL=   where the page (not the API) fetches the weights; a mirror with the CDN's layout. Build time
 NEXT_PUBLIC_SITE_URL=    the public origin, for the URLs on this page`}</Code>
         <P>
           On Vercel the route declares a {API.maxDuration} second duration, which every plan allows: functions may run 300 seconds with Fluid Compute (on by
