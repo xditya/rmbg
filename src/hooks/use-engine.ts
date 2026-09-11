@@ -46,6 +46,20 @@ export function useEngine(opts: EngineOptions = {}) {
     };
   }, []);
 
+  /** Called with the engine a finished job actually ran on; toasts once if WebGPU fell back. */
+  const noteResult = useCallback(
+    (used: Engine) => {
+      setEngine((prev) => {
+        if (prev === "webgpu" && used === "wasm" && !fellBack.current) {
+          fellBack.current = true;
+          queueMicrotask(() => push("info", "WebGPU didn't work here, using WebAssembly instead."));
+        }
+        return used;
+      });
+    },
+    [push],
+  );
+
   const ensure = useCallback((): Promise<void> => {
     if (readyRef.current) return Promise.resolve();
     if (!promise.current) {
@@ -61,7 +75,9 @@ export function useEngine(opts: EngineOptions = {}) {
       };
       promise.current = Promise.resolve()
         .then(() => preloadModel(onProgress))
-        .then(() => {
+        .then((used) => {
+          // The preload may have fallen back to WebAssembly; say so now, not at the first result.
+          noteResult(used);
           readyRef.current = true;
           setReady(true);
           setDownload(null);
@@ -75,21 +91,7 @@ export function useEngine(opts: EngineOptions = {}) {
         });
     }
     return promise.current;
-  }, []);
-
-  /** Called with the engine a finished job actually ran on; toasts once if WebGPU fell back. */
-  const noteResult = useCallback(
-    (used: Engine) => {
-      setEngine((prev) => {
-        if (prev === "webgpu" && used === "wasm" && !fellBack.current) {
-          fellBack.current = true;
-          queueMicrotask(() => push("info", "WebGPU didn't work here, using WebAssembly instead."));
-        }
-        return used;
-      });
-    },
-    [push],
-  );
+  }, [noteResult]);
 
   const isReady = useCallback(() => readyRef.current, []);
 

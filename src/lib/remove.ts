@@ -142,7 +142,7 @@ async function initLibrary(lib: Library, config: Config): Promise<void> {
  * the backend: those must not send WebGPU machines to the WebAssembly fallback. The library
  * wraps backend failures as "Failed to create session: ..." and raises fetch problems raw.
  */
-function isTransferError(error: unknown): boolean {
+export function isTransferError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
   if (/create session/i.test(msg)) return false;
   return error instanceof TypeError || /Failed to fetch|Resource .*not found|Load failed|NetworkError/i.test(msg);
@@ -183,7 +183,7 @@ function loadLibrary(): Promise<Library> {
 }
 
 /** Settles like `work`, unless the signal fires first, in which case it rejects with AbortError. */
-function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+export function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work;
   if (signal.aborted) {
     work.catch(() => {});
@@ -196,11 +196,14 @@ function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promis
   });
 }
 
-/** Fetches and warms the model so the first image doesn't pay for it. Safe to call many times. */
-export async function preloadModel(onProgress?: (p: Progress) => void): Promise<void> {
+/**
+ * Fetches and warms the model so the first image doesn't pay for it. Safe to call many times.
+ * Resolves with the engine that actually came up, which is "wasm" after a WebGPU fallback.
+ */
+export async function preloadModel(onProgress?: (p: Progress) => void): Promise<Engine> {
   const lib = await loadLibrary();
-  const engine = await effectiveEngine();
-  const raw = makeProgressMapper(engine, onProgress);
+  let engine = await effectiveEngine();
+  let raw = makeProgressMapper(engine, onProgress);
   listeners.add(raw);
   try {
     try {
@@ -208,8 +211,14 @@ export async function preloadModel(onProgress?: (p: Progress) => void): Promise<
     } catch (error) {
       if (engine !== "webgpu" || isTransferError(error)) throw error;
       rememberGpuFailure();
-      await initLibrary(lib, libraryConfig("wasm"));
+      // A fresh mapper: the WebAssembly files must not be added on top of the WebGPU total.
+      listeners.delete(raw);
+      engine = "wasm";
+      raw = makeProgressMapper(engine, onProgress);
+      listeners.add(raw);
+      await initLibrary(lib, libraryConfig(engine));
     }
+    return engine;
   } finally {
     listeners.delete(raw);
   }
@@ -262,15 +271,25 @@ async function decode(file: Blob): Promise<ImageBitmap> {
   }
 }
 
-/** Decodes, downscales when needed, and reports the resulting pixel size. Closes its bitmap. */
+/**
+ * The library decodes PNG, JPEG and WebP itself; everything else (GIF, BMP, AVIF, files with
+ * no type) throws inside it, so those are handed over as PNG from the bitmap we already have.
+ */
+const PASSTHROUGH = /^image\/(png|jpe?g|webp)$/i;
+
+/**
+ * Decodes, downscales when needed, re-encodes formats the library cannot read, and reports the
+ * resulting pixel size. Closes its bitmap. An animated GIF yields its first frame, which is
+ * the frame the cutout should come from.
+ */
 async function fit(file: Blob, maxEdge: number): Promise<{ blob: Blob; width: number; height: number }> {
   const bitmap = await decode(file);
   try {
     const { width, height } = bitmap;
     const longest = Math.max(width, height);
-    if (longest <= maxEdge) return { blob: file, width, height };
+    if (longest <= maxEdge && PASSTHROUGH.test(file.type)) return { blob: file, width, height };
 
-    const scale = maxEdge / longest;
+    const scale = Math.min(1, maxEdge / longest);
     const w = Math.max(1, Math.round(width * scale));
     const h = Math.max(1, Math.round(height * scale));
     const { canvas, ctx } = makeSurface(w, h);
@@ -297,8 +316,9 @@ export async function loadImageMeta(file: Blob): Promise<{ width: number; height
 }
 
 /**
- * Re-encodes to PNG when the longest edge exceeds maxEdge; returns the same Blob otherwise.
- * `removeBackground` does this itself, so only call it when the fitted Blob is needed on its own.
+ * Re-encodes to PNG when the longest edge exceeds maxEdge or the format is one the library
+ * cannot decode; returns the same Blob otherwise. `removeBackground` does this itself, so only
+ * call it when the fitted Blob is needed on its own.
  */
 export async function downscaleIfNeeded(file: Blob, maxEdge: number): Promise<Blob> {
   const { blob } = await fit(file, maxEdge);

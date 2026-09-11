@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LIMITS } from "@/lib/config";
-import { removeBackground, type Engine, type RemoveResult } from "@/lib/remove";
+import { isTransferError, removeBackground, withAbort, type Engine, type RemoveResult } from "@/lib/remove";
 import { makeThumb } from "@/lib/thumb";
 import { formatBytes } from "@/lib/format";
 
 export type CardState = "queued" | "loading-model" | "removing" | "done" | "failed";
-export type CardError = "decode" | "model" | "inference";
+/** `model`: the download failed (pauses the queue). `engine`: the weights arrived but the runtime could not start here. */
+export type CardError = "decode" | "model" | "engine" | "inference";
 export type Download = { loaded: number; total: number };
 
 export type Card = {
@@ -172,8 +173,10 @@ export function useQueue(opts: QueueOptions) {
   const optsRef = useRef(opts);
   const controllers = useRef(new Map<string, AbortController>());
   const running = useRef<string | null>(null);
+  /** Set while the model is running on an image (on WebAssembly that holds the main thread). */
+  const inferring = useRef(false);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  /** Cards added while a job was running; decoded once it settles so the work never lands on a busy main thread. */
+  /** Cards added during an inference; decoded once it settles so the work never lands on a busy main thread. */
   const pending = useRef<Card[]>([]);
 
   useEffect(() => {
@@ -211,16 +214,18 @@ export function useQueue(opts: QueueOptions) {
       dispatch({ type: "start", id: card.id, state: modelReady() ? "removing" : "loading-model" });
       optsRef.current.onStart?.(card);
       try {
-        await ensureModel();
+        // Racing the signal lets a removed card settle at once; the shared preload carries on.
+        await withAbort(ensureModel(), ctrl.signal);
       } catch (e) {
+        if (!alive()) return;
         console.error("rmbg: the model didn't load", e);
-        if (alive()) {
-          dispatch({ type: "fail", id: card.id, error: "model" });
-          optsRef.current.onFail?.(card, "model");
-        }
+        const error = isTransferError(e) ? "model" : "engine";
+        dispatch({ type: "fail", id: card.id, error });
+        optsRef.current.onFail?.(card, error);
         return;
       }
       if (!alive()) return;
+      inferring.current = true;
       dispatch({ type: "infer", id: card.id });
       // The engine fits the photo to LIMITS.maxEdge itself and reports the size it used.
       const result = await removeBackground(card.file, {
@@ -251,24 +256,25 @@ export function useQueue(opts: QueueOptions) {
       optsRef.current.onFail?.(card, "inference");
     } finally {
       if (controllers.current.get(card.id) === ctrl) controllers.current.delete(card.id);
+      inferring.current = false;
       running.current = null;
       setTick((t) => t + 1);
     }
   }, [inQueue]);
 
-  // The scheduler: whenever nothing is in flight, decode whatever arrived during the last job,
-  // then start the first queued card whose dimensions are known (decode failures never get
-  // this far). A card whose state says it is working counts as in flight even after its
-  // promise settled: React can render the `start` update on its own before the `done`/`fail`
-  // that followed it, and the ref alone would let a second job slip in during that
-  // intermediate render.
+  // The scheduler: whenever no inference is running, decode whatever arrived during the last
+  // one; whenever nothing is in flight, start the first queued card whose dimensions are known
+  // (decode failures never get this far). A card whose state says it is working counts as in
+  // flight even after its promise settled: React can render the `start` update on its own
+  // before the `done`/`fail` that followed it, and the ref alone would let a second job slip
+  // in during that intermediate render.
   useEffect(() => {
-    if (running.current) return;
-    if (pending.current.length) {
+    if (!inferring.current && pending.current.length) {
       const batch = pending.current;
       pending.current = [];
       batch.forEach(inspect);
     }
+    if (running.current) return;
     if (state.paused) return;
     if (state.cards.some((c) => c.state === "loading-model" || c.state === "removing")) return;
     const next = state.cards.find((c) => c.state === "queued" && !c.leaving && c.width !== undefined);
@@ -297,8 +303,9 @@ export function useQueue(opts: QueueOptions) {
       state: "queued",
     }));
     if (cards.length) dispatch({ type: "add", cards });
-    // On WebAssembly the inference holds the main thread, so decodes wait for the job to settle.
-    if (running.current) pending.current.push(...cards);
+    // On WebAssembly the inference holds the main thread, so decodes wait for it to settle;
+    // a model download or a WebGPU run leaves the thread free.
+    if (inferring.current) pending.current.push(...cards);
     else cards.forEach(inspect);
     return { added: cards, rejected };
   }, [inspect]);
