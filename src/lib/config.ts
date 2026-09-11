@@ -16,6 +16,32 @@ export const LIMITS = {
   /** Most files one drop can add; the rest are skipped with a toast. */
   maxFiles: 30,
   accept: ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/avif"],
+  /** Largest body the HTTP API takes. Smaller than the page's cap: the photo travels over the network and is held in server memory. */
+  apiMaxBytes: 12 * 1024 * 1024,
+  /** Most pixels the API decodes for one photo (RGBA, so ×4 bytes in memory). 8K is 33 MP; bigger photos are refused, not downscaled. */
+  apiMaxPixels: 40_000_000,
+} as const;
+
+/** The HTTP API (`/api/v1`). The engine runs on the server with the WebAssembly-path weights. */
+export const API = {
+  path: "/api/v1/remove",
+  engine: "onnxruntime-node",
+  model: "isnet_quint8",
+  /** Where the weights come from unless `RMBG_MODEL_URL` says otherwise. Same CDN and version the browser uses. */
+  modelBaseUrl: "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/",
+  /** The assembled `isnet_quint8.onnx` from that CDN (`MODEL_FILES.wasm` has the same size); anything else is refused. */
+  modelBytes: 44_348_940,
+  modelSha256: "d1ca3535c21b53d08fa3b640e5949389f82e764f6376a0502d44982c35cae482",
+  backdrops: ["transparent", "white", "black", "#rrggbb", "blur"],
+  formats: ["png", "webp"],
+  webpQuality: 92,
+  /** Requests per minute per IP unless `RATE_LIMIT_PER_MIN` overrides it. */
+  ratePerMinute: 10,
+  /** Runs at once per process, and how many may wait before the API answers 503. */
+  concurrency: 2,
+  maxQueue: 8,
+  /** Vercel function cap, inside every plan's limit (300 s with Fluid Compute, 60 s on Hobby without); a run is 2 to 5 s. */
+  maxDuration: 60,
 } as const;
 
 /**
