@@ -8,6 +8,7 @@ import { isMac, useHotkeys, type Hotkey } from "@/hooks/use-hotkeys";
 import { useClientFact } from "@/hooks/use-media";
 import { isDownloading, useQueue } from "@/hooks/use-queue";
 import { TRANSPARENT, type BackdropChoice } from "@/lib/backdrop";
+import type { EnginePreference } from "@/lib/remove";
 import { LIMITS, SITE } from "@/lib/config";
 import { formatBytes, formatDims, formatMs, formatWholeMB } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -15,6 +16,7 @@ import { ActionButtons, PhoneBar, useActions } from "./action-bar";
 import { BackgroundPicker } from "./background-picker";
 import { DropOverlay } from "./drop-overlay";
 import { Dropzone } from "./dropzone";
+import { canRedo, EnginePicker } from "./engine-picker";
 import { MoreSheet } from "./more-sheet";
 import { Notice } from "./notice";
 import { Queue } from "./queue";
@@ -30,6 +32,9 @@ const ANNOUNCE_MS = 2000;
 const isTyping = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
 
 const VIEW_RADIO = '[role="radiogroup"][aria-label="View"] [aria-checked="true"]';
+
+/** What the live region says when the engine choice changes (the picker itself shows no toast). */
+const ENGINE_ANNOUNCE: Record<EnginePreference, string> = { wasm: "Engine: processor only.", auto: "Engine: automatic." };
 
 /** How long a leaving row keeps its node (see use-queue); focus is checked again once it is gone. */
 const EXIT_MS = 160;
@@ -107,7 +112,7 @@ export function Remover() {
     },
     onFail: (card) => announce(`Couldn't remove the background from ${card.name}`),
   });
-  const { cards, selected, selectedId, counts, modelFailed, add, select, remove, clear, retry } = queue;
+  const { cards, selected, selectedId, counts, modelFailed, add, select, remove, clear, retry, redo } = queue;
   const liveCards = useMemo(() => cards.filter((c) => !c.leaving), [cards]);
   // Leaving cards still count here so the queue stays mounted while their exit plays.
   const multi = cards.length >= 2;
@@ -175,6 +180,25 @@ export function Remover() {
       keepFocus();
     },
     [retry, keepFocus],
+  );
+
+  /** Runs the selected photo again on the engine the preference now implies; the reveal repeats when it lands. */
+  const redoCard = useCallback(
+    (id: string) => {
+      unrevealed.current.delete(id);
+      redo(id);
+      keepFocus();
+    },
+    [redo, keepFocus],
+  );
+
+  const chooseEngine = useCallback(
+    (next: EnginePreference) => {
+      if (next === engine.preference) return;
+      engine.setPreference(next);
+      announce(ENGINE_ANNOUNCE[next]);
+    },
+    [engine, announce],
   );
 
   const chooseView = useCallback(
@@ -341,6 +365,8 @@ export function Remover() {
   const removeHint = mac ? "⌘ Backspace" : "Ctrl Backspace";
   // The selected card's own error, else the model failure that is holding the whole queue.
   const notice = selected?.state === "failed" ? selected : modelFailed;
+  // "Redo this photo" only while the selected card's cut and the engine choice disagree.
+  const onRedo = selected && canRedo(selected, engine.preference, engine.detected) ? () => redoCard(selected.id) : null;
 
   return (
     <div ref={root} tabIndex={-1} className={cn("relative flex flex-1 flex-col outline-none", !empty && "lg:flex-row lg:gap-4")}>
@@ -390,24 +416,14 @@ export function Remover() {
               view={view}
               backdrop={backdrop}
               engine={engine.engine}
-              enginePreference={engine.preference}
-              onToggleEngine={engine.toggle}
               download={download}
               compare={compare}
               onCompare={setCompare}
               waitingForModel={waitingForModel}
               firstRun={firstRun}
             />
-            <div className="flex h-8 items-center gap-3 px-4 font-mono text-[12px] text-fg-faint sm:hidden [@media(pointer:coarse)]:h-11">
-              <StatusLine
-                card={selected}
-                engine={engine.engine}
-                enginePreference={engine.preference}
-                onToggleEngine={engine.toggle}
-                download={download}
-                waitingForModel={waitingForModel}
-                firstRun={firstRun}
-              />
+            <div className="flex h-8 items-center gap-3 px-4 font-mono text-[12px] text-fg-faint sm:hidden">
+              <StatusLine card={selected} engine={engine.engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} />
             </div>
             {notice && <Notice card={notice} onRetry={() => retryCard(notice.id)} onRemove={() => removeCard(notice.id)} className="max-sm:mx-4 max-sm:my-2 sm:mt-2" />}
 
@@ -439,6 +455,8 @@ export function Remover() {
                     </Button>
                   }
                 />
+                {/* The tablet toolbar's last row: the engine choice, its control sized like the view switch above it. */}
+                <EnginePicker shape="segmented" inline value={engine.preference} onChange={chooseEngine} onRedo={onRedo} className="w-full" />
               </div>
             </div>
             {multi && (
@@ -470,6 +488,9 @@ export function Remover() {
               <ActionButtons actions={actions} layout="column" onDoAnother={openPicker} />
             </div>
             <div className="px-4 py-3">
+              <EnginePicker shape="segmented" value={engine.preference} onChange={chooseEngine} onRedo={onRedo} />
+            </div>
+            <div className="px-4 py-3">
               <p className="mb-2 text-[12px] text-fg-faint">background</p>
               <BackgroundPicker value={backdrop} onChange={setBackdrop} previewUrl={selected.thumbUrl ?? selected.originalUrl} disabled={!done} size="md" className="gap-2" />
             </div>
@@ -493,7 +514,8 @@ export function Remover() {
             onRemove={() => removeCard(selected.id)}
             onClearAll={clearAll}
             enginePreference={engine.preference}
-            onToggleEngine={engine.toggle}
+            onChooseEngine={chooseEngine}
+            onRedo={onRedo}
           />
         </>
       )}

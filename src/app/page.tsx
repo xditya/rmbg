@@ -40,7 +40,9 @@ function About() {
       <p className="mt-4">
         Under each finished photo you can see what did the cut. <strong className="font-medium text-fg">Graphics chip</strong> is the fast way and is used
         when your browser and device can do it. <strong className="font-medium text-fg">Processor</strong> is slower, a few seconds a photo, but it works
-        everywhere. If a cutout looks wrong, tap that name and the next photo uses the processor instead; on phones the same switch is in More.
+        everywhere. You can choose too: under <em className="not-italic text-fg">engine</em> on a desktop, or in More on a phone, pick{" "}
+        <em className="not-italic text-fg">Automatic</em> or <em className="not-italic text-fg">Processor only</em>. The choice applies to the next photo;{" "}
+        <em className="not-italic text-fg">Redo this photo</em> re-cuts the current one with it, which is the thing to try when a cutout looks wrong.
       </p>
       <p className="mt-4">
         Scripting it? The same cut is one HTTP call away: see{" "}

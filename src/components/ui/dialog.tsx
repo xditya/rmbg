@@ -10,6 +10,9 @@ const SWIPE_CLOSE = 80;
 /** How long the closing fade runs before the element is actually closed. */
 const DIALOG_EXIT_MS = 150;
 
+/** A full-width row in a sheet's list (the phone More sheet and its settings share it). */
+export const sheetRow = "flex h-12 w-full items-center gap-3 px-4 text-left text-[15px] transition-colors active:bg-surface-2";
+
 /**
  * Modal built on the native <dialog> element. Centred on desktop; on phones it becomes a
  * bottom sheet (full width, rounded top, clear of the home indicator) so it reads as an app

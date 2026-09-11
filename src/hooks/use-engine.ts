@@ -1,17 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import {
-  getEnginePreference,
-  gpuFallbackReason,
-  preloadModel,
-  resolveEngine,
-  setEnginePreference,
-  subscribeEnginePreference,
-  type Engine,
-  type EnginePreference,
-  type Progress,
-} from "@/lib/remove";
+import { detectEngine, getEnginePreference, gpuFallbackReason, preloadModel, setEnginePreference, subscribeEnginePreference, type Engine, type EnginePreference, type Progress } from "@/lib/remove";
 import { useToast } from "@/components/ui/toast";
 
 export type Download = { loaded: number; total: number };
@@ -20,11 +10,6 @@ const FALLBACK_NOTICE = {
   error: "Your graphics chip couldn't run the model, so it runs on your processor instead.",
   "wrong-result": "Your graphics chip gave a wrong cutout, so the model now runs on your processor. Slower, but right.",
 } as const;
-
-const PREFERENCE_NOTICE: Record<EnginePreference, string> = {
-  wasm: "The next photo uses your processor. Slower, but it works on every device.",
-  auto: "The next photo uses your graphics chip when it gives a good cutout.",
-};
 
 /**
  * Owns the model: which backend it runs on, the one-time download and its progress.
@@ -46,10 +31,16 @@ export function useEngine(opts: EngineOptions = {}) {
   useEffect(() => {
     optsRef.current = opts;
   });
-  /** The engine the next job will run on (null until detection finishes); the label under the photo. */
-  const [engine, setEngine] = useState<Engine | null>(null);
+  /**
+   * What "Automatic" resolves to on this device: WebGPU when the adapter can run the model,
+   * else WebAssembly (null until detection finishes). Drops to WebAssembly for good once a
+   * WebGPU run has failed or given a wrong cutout.
+   */
+  const [detected, setDetected] = useState<Engine | null>(null);
   // Module state in remove.ts (the URL, then localStorage); "auto" on the server so markup hydrates cleanly.
   const preference = useSyncExternalStore(subscribeEnginePreference, getEnginePreference, () => "auto" as EnginePreference);
+  /** The engine the next job will run on (null until detection finishes); the label under the photo. */
+  const engine: Engine | null = preference === "wasm" ? "wasm" : detected;
   const [download, setDownload] = useState<Download | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,9 +51,10 @@ export function useEngine(opts: EngineOptions = {}) {
   useEffect(() => {
     let live = true;
     Promise.resolve()
-      .then(resolveEngine)
+      .then(detectEngine)
       .then((e) => {
-        if (live) setEngine(e);
+        // Detection may have raced a failed run; the failure memory wins.
+        if (live) setDetected(gpuFallbackReason() ? "wasm" : e);
       })
       .catch(() => {
         /* the engine label stays unknown until a result reports it */
@@ -80,23 +72,17 @@ export function useEngine(opts: EngineOptions = {}) {
         fellBack.current = true;
         push("info", FALLBACK_NOTICE[reason]);
       }
-      // A job that ran on WebGPU says nothing about the next one once the preference is WebAssembly.
-      setEngine(used === "webgpu" && getEnginePreference() === "wasm" ? "wasm" : used);
+      // A WebGPU result proves the chip works; a fallback means "Automatic" is WebAssembly from now on.
+      if (used === "webgpu") setDetected("webgpu");
+      else if (gpuFallbackReason()) setDetected("wasm");
     },
     [push],
   );
 
-  /** Flips auto <-> WebAssembly for the next job; the running one is left alone. */
-  const toggle = useCallback(() => {
-    const next: EnginePreference = getEnginePreference() === "wasm" ? "auto" : "wasm";
-    setEnginePreference(next);
-    push("info", PREFERENCE_NOTICE[next]);
-    resolveEngine()
-      .then(setEngine)
-      .catch(() => {
-        /* the label follows the next result instead */
-      });
-  }, [push]);
+  /** Sets the choice for the next job (and for the next visit, see remove.ts); the running one is left alone. */
+  const setPreference = useCallback((next: EnginePreference) => {
+    if (next !== getEnginePreference()) setEnginePreference(next);
+  }, []);
 
   const ensure = useCallback((): Promise<void> => {
     if (readyRef.current) return Promise.resolve();
@@ -133,11 +119,7 @@ export function useEngine(opts: EngineOptions = {}) {
           setDownload(null);
           setError(e instanceof Error ? e.message : "model download failed");
           // A WebGPU attempt that failed on the way to WebAssembly leaves the next job on WebAssembly; say so now.
-          resolveEngine()
-            .then(setEngine)
-            .catch(() => {
-              /* the label follows the next result instead */
-            });
+          if (gpuFallbackReason()) setDetected("wasm");
           throw e;
         });
     }
@@ -146,7 +128,7 @@ export function useEngine(opts: EngineOptions = {}) {
 
   const isReady = useCallback(() => readyRef.current, []);
 
-  return { engine, preference, toggle, download, ready, error, ensure, isReady, noteResult };
+  return { engine, detected, preference, setPreference, download, ready, error, ensure, isReady, noteResult };
 }
 
 export type EngineHandle = ReturnType<typeof useEngine>;

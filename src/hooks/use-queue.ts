@@ -52,7 +52,8 @@ type Action =
   | { type: "infer"; id: string }
   | { type: "done"; id: string; result: RemoveResult; url: string }
   | { type: "fail"; id: string; error: CardError }
-  | { type: "retry"; id: string };
+  | { type: "retry"; id: string }
+  | { type: "redo"; id: string };
 
 const initial: State = { cards: [], selectedId: null, paused: false };
 
@@ -129,6 +130,29 @@ function reducer(state: State, a: Action): State {
       };
     case "retry":
       return { ...state, paused: false, cards: patch(state.cards, a.id, (c) => ({ ...c, state: "queued", error: undefined, progress: undefined })) };
+    case "redo":
+      // Back to queued in place, with no trace of the old result; the URLs were revoked by the caller.
+      return {
+        ...state,
+        paused: false,
+        cards: patch(state.cards, a.id, (c) =>
+          c.state === "done" || c.state === "failed"
+            ? {
+                ...c,
+                state: "queued",
+                error: undefined,
+                progress: undefined,
+                resultUrl: undefined,
+                resultBlob: undefined,
+                resultThumbUrl: undefined,
+                resultWidth: undefined,
+                resultHeight: undefined,
+                ms: undefined,
+                engine: undefined,
+              }
+            : c,
+        ),
+      };
   }
 }
 
@@ -261,12 +285,15 @@ export function useQueue(opts: QueueOptions) {
         },
       });
       if (!alive()) return;
-      dispatch({ type: "done", id: card.id, result, url: URL.createObjectURL(result.blob) });
+      const resultUrl = URL.createObjectURL(result.blob);
+      dispatch({ type: "done", id: card.id, result, url: resultUrl });
       optsRef.current.onDone?.(card, result);
       withDecodeSlot(() => makeThumb(result.blob))
         .then(({ url }) => {
           if (!url) return;
-          if (inQueue(card.id)) dispatch({ type: "resultThumb", id: card.id, url });
+          // Still the result this thumb was made from: a redo in the meantime has cleared it.
+          const now = stateRef.current.cards.find((c) => c.id === card.id);
+          if (now && !now.leaving && now.resultUrl === resultUrl) dispatch({ type: "resultThumb", id: card.id, url });
           else URL.revokeObjectURL(url);
         })
         .catch(() => {
@@ -284,7 +311,7 @@ export function useQueue(opts: QueueOptions) {
       running.current = null;
       setTick((t) => t + 1);
     }
-  }, [inQueue]);
+  }, []);
 
   // The scheduler: whenever no inference is running, decode whatever arrived during the last
   // one; whenever nothing is in flight, start the head of the queue once its dimensions are
@@ -367,6 +394,15 @@ export function useQueue(opts: QueueOptions) {
 
   const retry = useCallback((id: string) => dispatch({ type: "retry", id }), []);
 
+  /** Runs a finished (or failed) card again, from queued, in its place: the result goes, the scheduler picks it up. */
+  const redo = useCallback((id: string) => {
+    const card = stateRef.current.cards.find((c) => c.id === id);
+    if (!card || card.leaving || (card.state !== "done" && card.state !== "failed")) return;
+    if (card.resultUrl) URL.revokeObjectURL(card.resultUrl);
+    if (card.resultThumbUrl) URL.revokeObjectURL(card.resultThumbUrl);
+    dispatch({ type: "redo", id });
+  }, []);
+
   // Unmount: abort everything and give the URLs back.
   useEffect(() => {
     const ctrls = controllers.current;
@@ -394,7 +430,7 @@ export function useQueue(opts: QueueOptions) {
   /** The card whose model download or start failed, while it keeps the queue paused. */
   const modelFailed = useMemo(() => (state.paused ? (cards.find((c) => c.state === "failed" && isModelError(c.error) && !c.leaving) ?? null) : null), [cards, state.paused]);
 
-  return { cards, selectedId: state.selectedId, selected, counts, paused: state.paused, modelFailed, add, select, remove, clear, retry };
+  return { cards, selectedId: state.selectedId, selected, counts, paused: state.paused, modelFailed, add, select, remove, clear, retry, redo };
 }
 
 export type QueueHandle = ReturnType<typeof useQueue>;

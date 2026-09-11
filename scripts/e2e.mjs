@@ -2,8 +2,9 @@
  * End-to-end smoke test: boots the production server, screenshots the empty and result states
  * at phone / tablet / desktop widths in both themes, runs one real image through the model
  * (WebAssembly in headless Chromium) to check the cutout has a transparent border and an
- * opaque subject, exercises the engine switch (the label button, its touch target,
- * `?engine=wasm`) and the mask judge behind the WebGPU self-check, checks the headers of the
+ * opaque subject, exercises the engine picker (the two radios in More on the phone layout,
+ * their touch targets, the desktop control after a reload, `?engine=wasm`), the `canRedo`
+ * decision behind "Redo this photo" and the mask judge behind the WebGPU self-check, checks the headers of the
  * frame the page runs WebGPU in, screenshots the docs page, and exercises the HTTP API
  * (POST /api/v1/remove, GET /api/v1/info) against the same server. The 429 check needs the
  * default rate limit, so it spawns one extra short-lived server on PORT + 1 with the limiter
@@ -294,6 +295,41 @@ async function loadMaskCheck() {
   return import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
 }
 
+/**
+ * `canRedo` from engine-picker.tsx, on its own: the function is plain JS once its signature's
+ * types go, and the rest of the file (React, the icons) is not needed to judge it.
+ */
+async function loadCanRedo() {
+  const src = readFileSync(resolve(ROOT, "src/components/remover/engine-picker.tsx"), "utf8");
+  const start = src.indexOf("export function canRedo(");
+  const end = src.indexOf("\n}\n", start);
+  if (start < 0 || end < 0) throw new Error("canRedo not found in engine-picker.tsx");
+  const fn = src.slice(start, end + 2);
+  const body = fn.indexOf("{");
+  const js = "export function canRedo(card, preference, detected) " + fn.slice(body);
+  return import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+}
+
+/**
+ * The Redo decision on every combination that matters: the preference against the engine the
+ * photo ran on, with detection deciding whether "Automatic" would change anything, and no
+ * Redo at all for a photo that is still running.
+ */
+function canRedoUnit({ canRedo }) {
+  const cases = [
+    { name: "processor only after a graphics-chip cut", card: { state: "done", engine: "webgpu" }, preference: "wasm", detected: "webgpu", expect: true },
+    { name: "automatic after a processor cut, chip available", card: { state: "done", engine: "wasm" }, preference: "auto", detected: "webgpu", expect: true },
+    { name: "processor only after a processor cut", card: { state: "done", engine: "wasm" }, preference: "wasm", detected: "wasm", expect: false },
+    { name: "automatic after a graphics-chip cut", card: { state: "done", engine: "webgpu" }, preference: "auto", detected: "webgpu", expect: false },
+    { name: "automatic after a processor cut, no chip", card: { state: "done", engine: "wasm" }, preference: "auto", detected: "wasm", expect: false },
+    { name: "automatic after a processor cut, detection pending", card: { state: "done", engine: "wasm" }, preference: "auto", detected: null, expect: false },
+    { name: "a photo still removing", card: { state: "removing", engine: "webgpu" }, preference: "wasm", detected: "webgpu", expect: false },
+    { name: "a queued photo", card: { state: "queued" }, preference: "wasm", detected: "webgpu", expect: false },
+    { name: "no photo", card: null, preference: "wasm", detected: "webgpu", expect: false },
+  ];
+  for (const c of cases) check(canRedo(c.card, c.preference, c.detected) === c.expect, `canRedo(${c.name}) is ${c.expect}`);
+}
+
 /** A synthetic 256x256 RGBA mask: opaque inside a centred disc of `radius`, clear outside; `flat` fills everything with one alpha. */
 function syntheticMask({ radius = 0, flat = null } = {}) {
   const size = 256;
@@ -347,12 +383,37 @@ async function withToasts(page, work) {
   }
 }
 
-/** The engine button under the photo: its label, the engine it names and the action it offers. */
-const engineButton = (page) =>
+/** The engine caption under the photo (the visible one: phones and wider layouts render different rows): its text, the engine it names, its tooltip. */
+const engineCaption = (page) =>
   page.evaluate(() => {
-    const b = document.querySelector("button[data-engine]");
-    return b ? { label: b.textContent?.trim() ?? "", engine: b.getAttribute("data-engine"), action: b.getAttribute("aria-label"), tooltip: b.getAttribute("title") } : null;
+    const b = Array.from(document.querySelectorAll("span[data-engine]")).find((e) => e.getClientRects().length > 0);
+    return b ? { label: b.textContent?.trim() ?? "", engine: b.getAttribute("data-engine"), tooltip: b.getAttribute("title"), isButton: b.tagName === "BUTTON" || !!b.closest("button") } : null;
   });
+
+/** The visible engine radiogroup (the More sheet's list, the desktop column's or the tablet toolbar's segmented control), its radios and the hint under it. */
+const enginePicker = (page) =>
+  page.evaluate(() => {
+    const group = Array.from(document.querySelectorAll('[role="radiogroup"][aria-labelledby]')).find((g) => g.querySelector("[data-engine-option]") && g.getClientRects().length > 0);
+    if (!group) return null;
+    const label = document.getElementById(group.getAttribute("aria-labelledby") ?? "")?.textContent?.trim() ?? "";
+    const radios = Array.from(group.querySelectorAll('[role="radio"]')).map((r) => {
+      const rect = r.getBoundingClientRect();
+      const spans = Array.from(r.querySelectorAll("span")).map((e) => e.textContent?.trim() ?? "");
+      return {
+        option: r.getAttribute("data-engine-option"),
+        name: spans.length >= 2 ? spans[1] : (r.textContent?.trim() ?? ""),
+        description: spans.length >= 3 ? spans[2] : "",
+        checked: r.getAttribute("aria-checked"),
+        rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height },
+      };
+    });
+    const hint = group.nextElementSibling?.tagName === "P" ? (group.nextElementSibling.textContent?.trim() ?? "") : null;
+    const redo = Array.from(document.querySelectorAll("button")).some((b) => /^Redo this photo$/.test(b.textContent?.trim() ?? "") && b.getClientRects().length > 0);
+    return { label, radios, hint, redo };
+  });
+
+/** The texts in the polite live region right now. */
+const liveTexts = (page) => page.evaluate(() => Array.from(document.querySelectorAll('[aria-live="polite"] span')).map((e) => e.textContent?.trim() ?? ""));
 
 /** Straight RGBA of the cutout on the stage, as a plain array (the page cannot hand a typed array over). */
 const resultRgba = (page) =>
@@ -424,7 +485,7 @@ async function runModel(browser) {
     try {
       return await page.evaluate(() => {
         const t = document.querySelector('nav[aria-label="Photo actions"]');
-        const lines = Array.from(document.querySelectorAll("span, p, button[data-engine]")).map((e) => e.textContent?.trim() ?? "");
+        const lines = Array.from(document.querySelectorAll("span, p")).map((e) => e.textContent?.trim() ?? "");
         return { title: document.title, status: lines.filter((l) => /downloading|removing|failed|Processor|Graphics chip|queued|waiting/i.test(l)).slice(0, 4), bar: !!t };
       });
     } catch {
@@ -495,7 +556,7 @@ async function runModel(browser) {
       corners: [at(2, 2), at(w - 3, 2), at(2, h - 3), at(w - 3, h - 3)],
       centre: at(Math.round(w / 2), Math.round(h / 2)),
       ring: { max: ringMax, mean: ringSum / ringN },
-      engine: document.querySelector("button[data-engine]")?.textContent?.trim() ?? null,
+      engine: Array.from(document.querySelectorAll("span[data-engine]")).find((e) => e.getClientRects().length > 0)?.textContent?.trim() ?? null,
     };
   });
   console.log(`info result ${pixels.width}x${pixels.height} engine=${pixels.engine} corners=${JSON.stringify(pixels.corners.map((c) => c[3]))} centre=${JSON.stringify(pixels.centre)} ring max ${pixels.ring.max} mean ${pixels.ring.mean.toFixed(2)}`);
@@ -504,56 +565,111 @@ async function runModel(browser) {
   check(pixels.ring.mean < 1 && pixels.ring.max <= 64, `border is clear (alpha mean ${pixels.ring.mean.toFixed(2)}, max ${pixels.ring.max})`);
   check(pixels.centre[3] >= 250, `centre is opaque (alpha ${pixels.centre[3]})`);
   // Chromium's software adapter (E2E_WEBGPU) has no shader-f16, so detection must land on WebAssembly there.
-  if (process.env.E2E_WEBGPU) check(pixels.engine === "Processor", `engine label reads Processor on the software adapter (${pixels.engine})`);
-  else check(pixels.engine === "Processor" || pixels.engine === "Graphics chip", `engine label shown (${pixels.engine})`);
-
-  await engineTogglePass(page, png);
+  if (process.env.E2E_WEBGPU) check(pixels.engine === "Processor", `engine caption reads Processor on the software adapter (${pixels.engine})`);
+  else check(pixels.engine === "Processor" || pixels.engine === "Graphics chip", `engine caption shown (${pixels.engine})`);
+  const caption = await engineCaption(page);
+  check(caption !== null && !caption.isButton && /^Cut on your (processor|graphics chip)/.test(caption.tooltip ?? ""), `engine caption is plain text with a tooltip (${caption?.tooltip})`);
 
   await ctx.close();
   return png;
 }
 
 /**
- * The engine label is a button. One press: a toast, the action flips to "Back to automatic",
- * the choice lands in localStorage and the next photo (a fresh load reads it at startup) runs
- * on WebAssembly with its label saying so. A second press brings automatic detection back.
+ * The engine picker. On the phone layout it lives in More: two radios, "Automatic" and
+ * "Processor only", each with its one-line description. Choosing "Processor only" moves the
+ * disc, lands in localStorage, says so in the live region and shows no toast; the sheet stays
+ * open. "Redo this photo" is not offered here: the photo ran on the processor, and choosing
+ * "Processor only" changes nothing for it; nor after "Automatic", since detection lands on
+ * the processor in headless Chromium. Then the same context at desktop width: the stored
+ * choice is read at startup, the segmented control mirrors it, the next photo runs on the
+ * processor, and choosing "Automatic" there flips the control, its hint and the storage.
  */
-async function engineTogglePass(page, png) {
-  const label = (s) => `engine switch: ${s}`;
-  const before = await engineButton(page);
-  check(before?.action === "Use the processor instead" && !!before.tooltip?.endsWith(`${before.action}.`), label(`button offers "Use the processor instead" and its tooltip explains, then ends with it (${before?.action} / ${before?.tooltip})`));
+async function enginePickerPass(browser, png) {
+  const label = (s) => `engine picker: ${s}`;
+  const ctx = await newContext(browser, { ...VIEWPORTS[0], theme: "light" });
+  const page = await ctx.newPage();
+  watch(page, "engine-picker");
+  await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  await page.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(label("photo reaches done state"));
+    await ctx.close();
+    return;
+  }
+  await sleep(300);
+  check((await enginePicker(page)) === null, label("no engine control is visible on the phone layout before More opens"));
+  await page.click('nav[aria-label="Photo actions"] button:has-text("More")');
+  await page.waitForSelector("dialog[open]");
+  await sleep(300);
+  let p = await enginePicker(page);
+  check(p?.label === "engine · applies to the next photo", label(`the sheet's group is labelled (${p?.label})`));
+  check(p?.radios.length === 2, label(`two radios (${p?.radios.length})`));
+  const auto = p?.radios.find((r) => r.option === "auto");
+  const wasm = p?.radios.find((r) => r.option === "wasm");
+  check(auto?.name === "Automatic" && auto.description === "Graphics chip when your device can do it, the fast way. Otherwise the processor.", label(`"Automatic" and its description (${auto?.name} / ${auto?.description})`));
+  check(wasm?.name === "Processor only" && wasm.description === "Slower, a few seconds a photo, but the cutout is right on every device.", label(`"Processor only" and its description (${wasm?.name} / ${wasm?.description})`));
+  check(auto?.checked === "true" && wasm?.checked === "false", label(`"Automatic" is checked to begin with (${auto?.checked} / ${wasm?.checked})`));
+  check(p?.redo === false, label("no Redo while the choice matches the photo's engine"));
 
   const { toasts } = await withToasts(page, async () => {
-    await page.click("button[data-engine]");
-    await sleep(600);
+    await page.click('dialog[open] [role="radio"][data-engine-option="wasm"]');
+    await sleep(500);
   });
-  check(toasts.includes("The next photo uses your processor. Slower, but it works on every device."), label(`press toasts "The next photo uses your processor…" (${JSON.stringify(toasts)})`));
-  const after = await engineButton(page);
-  check(after?.action === "Let it pick the fastest again", label(`action flips to "Let it pick the fastest again" (${after?.action})`));
-  const stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
+  p = await enginePicker(page);
+  check(p?.radios.find((r) => r.option === "wasm")?.checked === "true" && p?.radios.find((r) => r.option === "auto")?.checked === "false", label("choosing \"Processor only\" flips aria-checked"));
+  let stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
   check(stored === "wasm", label(`localStorage rmbg:engine is "wasm" (${stored})`));
+  check(toasts.length === 0, label(`no toast (${JSON.stringify(toasts)})`));
+  const live = await liveTexts(page);
+  check(live.includes("Engine: processor only."), label(`the live region says "Engine: processor only." (${JSON.stringify(live)})`));
+  check(await page.evaluate(() => !!document.querySelector("dialog[open]")), label("the sheet stays open"));
+  check(p?.redo === false, label("no Redo: the photo ran on the processor already"));
 
-  // The next photo, on a fresh load of the same context: the stored choice is read at startup.
+  await page.click('dialog[open] [role="radio"][data-engine-option="auto"]');
+  await sleep(400);
+  p = await enginePicker(page);
+  stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
+  check(p?.radios.find((r) => r.option === "auto")?.checked === "true" && stored === "auto", label(`back to "Automatic" (checked ${p?.radios.find((r) => r.option === "auto")?.checked}, stored ${stored})`));
+  check(p?.redo === false, label("no Redo either: automatic is the processor here (no shader-f16)"));
+  await page.click('dialog[open] [role="radio"][data-engine-option="wasm"]');
+  await sleep(300);
+  await page.screenshot({ path: `${SHOTS}/phone-more-engine.png` });
+  await page.click('dialog[open] button:has-text("Done")');
+  await sleep(300);
+
+  // The same context at desktop width, on a fresh load: the stored choice is read at startup.
+  await page.setViewportSize(VIEWPORTS[2]);
   await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
   await page.setInputFiles("#pick", { name: "disc2.png", mimeType: "image/png", buffer: png });
   try {
     await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
   } catch {
     fail(label("next photo reaches done state"));
+    await ctx.close();
     return;
   }
-  const next = await engineButton(page);
-  check(next?.label === "Processor" && next.engine === "wasm", label(`next photo ran on the processor (${next?.label})`));
-  check(next?.action === "Let it pick the fastest again", label(`the choice survived the reload (${next?.action})`));
+  await sleep(300);
+  p = await enginePicker(page);
+  check(p?.label === "engine" && p.radios.length === 2 && p.radios.map((r) => r.name).join("|") === "Automatic|Processor only", label(`the desktop control has the two segments under "engine" (${p?.label}: ${p?.radios.map((r) => r.name).join("|")})`));
+  check(p?.radios.find((r) => r.option === "wasm")?.checked === "true", label("the desktop control mirrors the stored choice after the reload"));
+  check(p?.hint === "Slower, but the cutout is right on every device.", label(`the hint explains "Processor only" (${p?.hint})`));
+  const next = await engineCaption(page);
+  check(next?.label === "Processor" && next.engine === "wasm", label(`the next photo ran on the processor (${next?.label})`));
+  check(p?.redo === false, label("no Redo on the desktop either"));
 
   const back = await withToasts(page, async () => {
-    await page.click("button[data-engine]");
-    await sleep(600);
+    await page.click('[role="radio"][data-engine-option="auto"]:visible');
+    await sleep(500);
   });
-  check(back.toasts.includes("The next photo uses your graphics chip when it gives a good cutout."), label(`second press toasts "The next photo uses your graphics chip…" (${JSON.stringify(back.toasts)})`));
-  const reset = await engineButton(page);
-  const storedBack = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
-  check(reset?.action === "Use the processor instead" && storedBack === "auto", label(`back to automatic (${reset?.action}, stored ${storedBack})`));
+  p = await enginePicker(page);
+  stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
+  check(p?.radios.find((r) => r.option === "auto")?.checked === "true" && stored === "auto", label(`"Automatic" on the desktop control flips it and the storage (stored ${stored})`));
+  check(p?.hint === "Graphics chip when your device can do it, otherwise the processor.", label(`the hint follows (${p?.hint})`));
+  check(back.toasts.length === 0, label(`no toast on the desktop either (${JSON.stringify(back.toasts)})`));
+  await page.screenshot({ path: `${SHOTS}/desktop-engine-column.png` });
+  await ctx.close();
 }
 
 /**
@@ -577,9 +693,10 @@ async function enginePass(browser, maskCheck) {
     await ctx.close();
     return;
   }
-  const b = await engineButton(page);
-  check(b?.label === "Processor" && b.engine === "wasm", label(`label reads Processor (${b?.label})`));
-  check(b?.action === "Let it pick the fastest again", label(`button offers "Let it pick the fastest again" (${b?.action})`));
+  const b = await engineCaption(page);
+  check(b?.label === "Processor" && b.engine === "wasm", label(`caption reads Processor (${b?.label})`));
+  const p = await enginePicker(page);
+  check(p?.radios.find((r) => r.option === "wasm")?.checked === "true", label("the picker shows \"Processor only\" for the visit"));
   const stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
   check(stored === null, label(`nothing persisted to localStorage (${stored})`));
 
@@ -656,8 +773,8 @@ async function gpuSelfCheckPass(browser, png) {
   }
   console.log(`info webgpu self-check toasts ${JSON.stringify(toasts)}`);
   check(toasts.includes("Your graphics chip gave a wrong cutout, so the model now runs on your processor. Slower, but right."), label("fallback notice names the wrong result"));
-  const b = await engineButton(page);
-  check(b?.label === "Processor", label(`label reads Processor after the fallback (${b?.label})`));
+  const b = await engineCaption(page);
+  check(b?.label === "Processor", label(`caption reads Processor after the fallback (${b?.label})`));
   // The page ran WebGPU in its frame and closed it on the way to WebAssembly; the frame held the weights.
   const frames = await page.evaluate(() => document.querySelectorAll('iframe[src="/gpu-frame"]').length);
   check(frames === 0, label(`the WebGPU frame is gone after the fallback (${frames} left)`));
@@ -707,11 +824,10 @@ async function framePass() {
 }
 
 /**
- * On a touch screen the engine button must be hittable over all of its 44px: the status rows
- * grow to that height under `pointer: coarse` so no neighbour paints over it. Measured the way
- * a finger lands: `elementFromPoint` down the middle of the button, then a real tap 2px inside
- * the top and the bottom edge, each of which must flip the preference. The phone row (under
- * the stage) and the tablet row (the stage footer) are different elements, so both widths.
+ * On a touch screen the two rows of the picker in More must be hittable over all of their
+ * height, which is at least 44px. Measured the way a finger lands: `elementFromPoint` down
+ * the middle of each row, then a real tap 2px inside the top edge of one and the bottom edge
+ * of the other, each of which must select that row.
  */
 async function engineTapPass(browser, png) {
   const label = (s) => `engine tap target: ${s}`;
@@ -729,37 +845,40 @@ async function engineTapPass(browser, png) {
     await ctx.close();
     return;
   }
+  await page.click('nav[aria-label="Photo actions"] button:has-text("More")');
+  await page.waitForSelector("dialog[open]");
+  await sleep(400);
   const measure = () =>
-    page.evaluate(() => {
-      const b = Array.from(document.querySelectorAll("button[data-engine]")).find((e) => e.getClientRects().length > 0);
-      if (!b) return null;
-      const r = b.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      // Pixel centres down the box; layout snaps the box to whole pixels, so one row of rounding is allowed.
-      let hit = 0;
-      for (let y = Math.floor(r.top) + 0.5; y < r.bottom; y++) if (b.contains(document.elementFromPoint(x, y))) hit++;
-      return { height: Math.round(r.height), hit, x, top: r.top, bottom: r.bottom, preference: b.getAttribute("data-engine-preference") };
-    });
-  for (const vp of [
-    { name: "phone", width: 390, height: 844 },
-    { name: "tablet", width: 820, height: 1180 },
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('dialog[open] [role="radio"][data-engine-option]')).map((b) => {
+        const r = b.getBoundingClientRect();
+        const x = r.left + r.width / 2;
+        // Pixel centres down the box; layout snaps the box to whole pixels, so one row of rounding is allowed.
+        let hit = 0;
+        for (let y = Math.floor(r.top) + 0.5; y < r.bottom; y++) if (b.contains(document.elementFromPoint(x, y))) hit++;
+        return { option: b.getAttribute("data-engine-option"), height: Math.round(r.height), hit, x, top: r.top, bottom: r.bottom, checked: b.getAttribute("aria-checked") };
+      }),
+    );
+  const rows = await measure();
+  check(rows.length === 2, label(`two rows in the sheet (${rows.length})`));
+  for (const m of rows) check(m.height >= 44 && m.hit >= m.height - 1, label(`${m.option}: the row is ${m.height}px tall and hittable over ${m.hit}px of it`));
+  for (const [option, edge] of [
+    ["wasm", "top"],
+    ["auto", "bottom"],
+    ["wasm", "bottom"],
+    ["auto", "top"],
   ]) {
-    await page.setViewportSize({ width: vp.width, height: vp.height });
-    await sleep(300);
-    const m = await measure();
-    check(m !== null && m.height >= 44 && m.hit >= 43, label(`${vp.name}: button is ${m?.height}px tall and hittable over ${m?.hit}px of it`));
+    const m = (await measure()).find((r) => r.option === option);
     if (!m) continue;
-    for (const [edge, y] of [
-      ["top", m.top + 2],
-      ["bottom", m.bottom - 2],
-    ]) {
-      const before = (await measure())?.preference;
-      await page.touchscreen.tap(m.x, y);
-      await sleep(400);
-      const after = (await measure())?.preference;
-      check(before !== after, label(`${vp.name}: a tap 2px inside the ${edge} edge flips the preference (${before} -> ${after})`));
-    }
+    check(m.checked === "false", label(`${option}: not selected before the ${edge} tap`));
+    await page.touchscreen.tap(m.x, edge === "top" ? m.top + 2 : m.bottom - 2);
+    await sleep(400);
+    const after = (await measure()).find((r) => r.option === option);
+    check(after?.checked === "true", label(`${option}: a tap 2px inside the ${edge} edge selects it`));
   }
+  await page.screenshot({ path: `${SHOTS}/phone-touch-more.png` });
+  await page.click('dialog[open] button:has-text("Done")');
+  await sleep(300);
   await page.screenshot({ path: `${SHOTS}/phone-touch-status.png` });
   await ctx.close();
 }
@@ -1046,6 +1165,7 @@ async function rateLimitPass() {
 async function main() {
   const maskCheck = await loadMaskCheck();
   maskCheckUnit(maskCheck);
+  canRedoUnit(await loadCanRedo());
   await ensureServer();
   const browser = await launch();
   let png = null;
@@ -1054,6 +1174,7 @@ async function main() {
     await shootDocs(browser);
     png = await runModel(browser);
     await enginePass(browser, maskCheck);
+    if (png) await enginePickerPass(browser, png);
     if (png) await engineTapPass(browser, png);
     if (png && process.env.E2E_WEBGPU) await gpuSelfCheckPass(browser, png);
     if (png) await shootResult(browser, png);

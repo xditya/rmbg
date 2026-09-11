@@ -1,11 +1,10 @@
 "use client";
 
-import { useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { ArrowLeftRight, Cpu, Zap } from "lucide-react";
+import { useRef, useState, type CSSProperties } from "react";
 import type { Card } from "@/hooks/use-queue";
 import { cardStatus, isDownloading } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
-import type { Engine, EnginePreference } from "@/lib/remove";
+import type { Engine } from "@/lib/remove";
 import { backdropColor, blurRadius, type BackdropChoice } from "@/lib/backdrop";
 import { LIMITS, modelDownloadNote } from "@/lib/config";
 import { formatDims, formatMB, formatMs, formatPx } from "@/lib/format";
@@ -18,8 +17,8 @@ export type Download = { loaded: number; total: number };
 
 /** Plain words for the two engines: WebGPU runs on the graphics chip, WebAssembly on the processor. */
 const ENGINE_LABEL: Record<Engine, string> = { webgpu: "Graphics chip", wasm: "Processor" };
-/** What the chip's tooltip says about the engine this photo used. */
-const ENGINE_HINT: Record<Engine, string> = { webgpu: "This photo was cut on your graphics chip, the fast way.", wasm: "This photo was cut on your processor. Slower, but it works on every device." };
+/** The caption's tooltip: what the engine that cut this photo is, in a sentence. */
+const ENGINE_HINT: Record<Engine, string> = { webgpu: "Cut on your graphics chip, the fast way.", wasm: "Cut on your processor. Slower, but it works on every device." };
 const DOWNSCALE_NOTE = `Photos over ${formatPx(LIMITS.maxEdge)} on the long side are scaled down before the cut.`;
 
 /** The view that can actually be shown: anything but the original needs a finished cutout. */
@@ -37,8 +36,6 @@ export function Stage({
   view,
   backdrop,
   engine,
-  enginePreference,
-  onToggleEngine,
   download,
   compare,
   onCompare,
@@ -50,9 +47,6 @@ export function Stage({
   view: View;
   backdrop: BackdropChoice;
   engine: Engine | null;
-  enginePreference: EnginePreference;
-  /** The engine chip is a button: automatic <-> always the processor, for the next photo. */
-  onToggleEngine: () => void;
   /** Bytes loaded so far while the model downloads (the card's own, or the shared preload). */
   download: Download | null;
   compare: number;
@@ -159,17 +153,8 @@ export function Stage({
           )}
         </div>
       </div>
-      <div className="hidden h-8 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 font-mono text-[12px] text-fg-faint sm:flex [@media(pointer:coarse)]:h-11">
-        <StatusLine
-          card={card}
-          engine={engine}
-          enginePreference={enginePreference}
-          onToggleEngine={onToggleEngine}
-          download={download}
-          waitingForModel={waitingForModel}
-          firstRun={firstRun}
-          withName
-        />
+      <div className="hidden h-8 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 font-mono text-[12px] text-fg-faint sm:flex">
+        <StatusLine card={card} engine={engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} withName />
       </div>
     </div>
   );
@@ -190,47 +175,14 @@ function Pill({ side, children }: { side: "left" | "right"; children: string }) 
 }
 
 /**
- * The engine name as a ghost button: one press sends the next photo to WebAssembly, the next
- * brings automatic detection back. Mono like the rest of the line. With a mouse the padding
- * fills the 32px row and the negative margins keep the text where a span's would be; on touch
- * screens the row itself grows to 44px (see the two status rows) and the button fills it, so
- * the whole target is really hittable instead of overflowing under the neighbours.
- */
-function EngineButton({ engine, preference, onToggle }: { engine: Engine; preference: EnginePreference; onToggle: () => void }) {
-  const action = preference === "wasm" ? "Let it pick the fastest again" : "Use the processor instead";
-  const Icon = engine === "webgpu" ? Zap : Cpu;
-  return (
-    <button
-      type="button"
-      data-engine={engine}
-      data-engine-preference={preference}
-      title={`${ENGINE_HINT[engine]} ${action}.`}
-      aria-label={action}
-      onClick={onToggle}
-      className={cn(
-        // A chip, so it reads as a control and not as a caption: icon, the engine, a swap glyph.
-        "-my-1 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2 font-mono text-[12px] leading-4 text-fg-muted",
-        "transition-[background-color,border-color,color,transform] duration-200 ease-quint hover:border-border-strong hover:bg-surface-2 hover:text-fg active:scale-[.97]",
-        "[@media(pointer:coarse)]:my-0 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:px-3 [@media(pointer:coarse)]:text-[13px]",
-      )}
-    >
-      <Icon className="size-3.5 shrink-0" aria-hidden />
-      {ENGINE_LABEL[engine]}
-      <ArrowLeftRight className="size-3 shrink-0 text-fg-faint" aria-hidden />
-    </button>
-  );
-}
-
-/**
  * Two mono spans: what is happening on the left, the numbers on the right. Rendered in the
  * stage footer on tablets and desktops and in its own row under the stage on phones. Once a
- * card is done (or failed) the left side is the engine button.
+ * card is done (or failed) the left side names the engine that cut it, in plain words; the
+ * engine is chosen elsewhere (the picker in the column, the toolbar or the More sheet).
  */
 export function StatusLine({
   card,
   engine,
-  enginePreference,
-  onToggleEngine,
   download,
   waitingForModel,
   firstRun,
@@ -238,16 +190,15 @@ export function StatusLine({
 }: {
   card: Card;
   engine: Engine | null;
-  enginePreference: EnginePreference;
-  onToggleEngine: () => void;
   download: Download | null;
   waitingForModel: boolean;
   firstRun?: boolean;
   withName?: boolean;
 }) {
   const known = card.engine ?? engine;
-  const label = <EngineButton engine={known ?? "wasm"} preference={enginePreference} onToggle={onToggleEngine} />;
-  let left: ReactNode = "";
+  /** The engine named on the left once the card has run (done or failed). */
+  let used: Engine | null = null;
+  let left = "";
   let right = "";
   let title: string | undefined;
   switch (card.state) {
@@ -273,11 +224,11 @@ export function StatusLine({
       right = withName ? card.name : "";
       break;
     case "failed":
-      left = known ? label : "";
+      used = known;
       right = withName ? `${card.name} · failed` : "failed";
       break;
     case "done": {
-      left = label;
+      used = known ?? "wasm";
       const src = card.width && card.height ? formatDims(card.width, card.height) : "";
       const out = card.resultWidth && card.resultHeight ? formatDims(card.resultWidth, card.resultHeight) : "";
       const scaled = src && out && src !== out;
@@ -287,11 +238,13 @@ export function StatusLine({
       break;
     }
   }
+  if (used) left = ENGINE_LABEL[used];
   return (
     <>
-      {/* On phones the right side is short or empty, so the left may shrink there; elsewhere the name yields.
-          The button stands on its own: a truncating span would clip its tap target. */}
-      {typeof left === "string" ? <span className="shrink-0 truncate max-sm:min-w-0 max-sm:shrink">{left}</span> : left}
+      {/* On phones the right side is short or empty, so the left may shrink there; elsewhere the name yields. */}
+      <span className="shrink-0 truncate max-sm:min-w-0 max-sm:shrink" title={used ? ENGINE_HINT[used] : undefined} data-engine={used ?? undefined}>
+        {left}
+      </span>
       <span className="ml-auto min-w-0 truncate text-right" title={title}>
         {right}
       </span>
