@@ -16,11 +16,20 @@ const ORDER: Kind[] = ["transparent", "white", "black", "custom", "blur"];
 const RAINBOW = "conic-gradient(from 0deg, #e5484d, #f5a524, #30a46c, #0091ff, #8e4ec6, #e5484d)";
 
 /**
+ * The last custom colour picked anywhere on the page. The picker is rendered twice (the
+ * phone row and the desktop column) and a colour picked in one must survive a switch to
+ * another swatch in the other, so it lives outside the instances. One page, one value.
+ */
+let lastCustomHex: string | null = null;
+
+/**
  * Transparent · white · black · custom · blur as a radiogroup of round swatches. The custom
- * swatch is a radio with the native colour input behind it: activating the radio (pointer or
- * keyboard) opens the picker through `showPicker` (`click()` where that is missing), so focus
- * never lands on the hidden input, and live `input` events are throttled to one update per
- * frame (iOS fires them continuously).
+ * swatch is a radio with the native colour input laid over it, invisible but hit-testable:
+ * a tap or click lands on the input itself, which is the only way iOS Safari opens its
+ * colour picker (`showPicker()` and a synthetic `click()` do nothing there). The keyboard
+ * path is the radio: it is the tab stop (the input is out of the tab order) and activating
+ * it opens the picker through `showPicker` (`click()` where that is missing). Live `input`
+ * events are throttled to one update per frame (iOS fires them continuously).
  */
 export function BackgroundPicker({
   value,
@@ -38,7 +47,9 @@ export function BackgroundPicker({
   size: keyof typeof SIZES;
   className?: string;
 }) {
-  const [customHex, setCustomHex] = useState<string | null>(value.kind === "custom" ? value.hex : null);
+  // The colour Custom re-picks after another swatch: the value while it is a custom colour, else the last one picked.
+  const [lastHex, setLastHex] = useState<string | null>(lastCustomHex);
+  const customHex = value.kind === "custom" ? value.hex : (lastHex ?? lastCustomHex);
   const colorRef = useRef<HTMLInputElement>(null);
   const raf = useRef(0);
   const pending = useRef<string | null>(null);
@@ -60,7 +71,8 @@ export function BackgroundPicker({
     raf.current = requestAnimationFrame(() => {
       raf.current = 0;
       if (pending.current) {
-        setCustomHex(pending.current);
+        lastCustomHex = pending.current;
+        setLastHex(pending.current);
         onChange({ kind: "custom", hex: pending.current });
       }
     });
@@ -134,11 +146,11 @@ export function BackgroundPicker({
                 ref={colorRef}
                 type="color"
                 defaultValue="#888888"
-                aria-hidden
+                aria-label={LABELS[kind]}
                 tabIndex={-1}
                 disabled={disabled}
                 onInput={(e) => onColorInput(e.currentTarget.value)}
-                className="pointer-events-none absolute inset-0 size-full opacity-0"
+                className={cn("absolute inset-0 size-full rounded-full opacity-0", disabled ? "cursor-not-allowed" : "cursor-pointer")}
               />
             </span>
           );
