@@ -21,11 +21,12 @@ const WORKER_CSP = ["default-src 'none'", "script-src 'self' blob: 'wasm-unsafe-
  * CUDA providers.
  */
 const ORT_LIB = "bin/napi-v3/linux/x64/libonnxruntime.so.1";
-const ORT_LINUX_LIB = [`./node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node/${ORT_LIB}`, `./node_modules/onnxruntime-node/${ORT_LIB}`];
-const ORT_FOREIGN_BINARIES = ["darwin", "win32"].flatMap((os) => [
-  `./node_modules/onnxruntime-node/bin/napi-v3/${os}/**`,
-  `./node_modules/.pnpm/onnxruntime-node*/node_modules/onnxruntime-node/bin/napi-v3/${os}/**`,
-]);
+// Only the real directory under .pnpm. The flat node_modules/onnxruntime-node path is a symlink,
+// and a traced file that passes through a symlinked directory makes Vercel reject the whole
+// function ("invalid deployment package"). With npm the flat path is the real one; the tracer
+// then finds the binding there and this include is a no-op, so self-hosters are unaffected.
+const ORT_LINUX_LIB = [`./node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node/${ORT_LIB}`];
+const ORT_FOREIGN_BINARIES = ["darwin", "win32"].map((os) => `./node_modules/.pnpm/onnxruntime-node*/node_modules/onnxruntime-node/bin/napi-v3/${os}/**`);
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
