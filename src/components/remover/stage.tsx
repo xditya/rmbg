@@ -1,10 +1,10 @@
 "use client";
 
-import { useRef, useState, type CSSProperties } from "react";
+import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Card } from "@/hooks/use-queue";
 import { cardStatus, isDownloading } from "@/hooks/use-queue";
 import { useFitRect } from "@/hooks/use-fit-rect";
-import type { Engine } from "@/lib/remove";
+import type { Engine, EnginePreference } from "@/lib/remove";
 import { backdropColor, blurRadius, type BackdropChoice } from "@/lib/backdrop";
 import { LIMITS, modelDownloadNote } from "@/lib/config";
 import { formatDims, formatMB, formatMs, formatPx } from "@/lib/format";
@@ -33,6 +33,8 @@ export function Stage({
   view,
   backdrop,
   engine,
+  enginePreference,
+  onToggleEngine,
   download,
   compare,
   onCompare,
@@ -44,6 +46,9 @@ export function Stage({
   view: View;
   backdrop: BackdropChoice;
   engine: Engine | null;
+  enginePreference: EnginePreference;
+  /** The engine label is a button: auto <-> WebAssembly for the next photo. */
+  onToggleEngine: () => void;
   /** Bytes loaded so far while the model downloads (the card's own, or the shared preload). */
   download: Download | null;
   compare: number;
@@ -150,8 +155,17 @@ export function Stage({
           )}
         </div>
       </div>
-      <div className="hidden h-8 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 font-mono text-[12px] text-fg-faint sm:flex">
-        <StatusLine card={card} engine={engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} withName />
+      <div className="hidden h-8 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 font-mono text-[12px] text-fg-faint sm:flex [@media(pointer:coarse)]:h-11">
+        <StatusLine
+          card={card}
+          engine={engine}
+          enginePreference={enginePreference}
+          onToggleEngine={onToggleEngine}
+          download={download}
+          waitingForModel={waitingForModel}
+          firstRun={firstRun}
+          withName
+        />
       </div>
     </div>
   );
@@ -172,12 +186,39 @@ function Pill({ side, children }: { side: "left" | "right"; children: string }) 
 }
 
 /**
+ * The engine name as a ghost button: one press sends the next photo to WebAssembly, the next
+ * brings automatic detection back. Mono like the rest of the line. With a mouse the padding
+ * fills the 32px row and the negative margins keep the text where a span's would be; on touch
+ * screens the row itself grows to 44px (see the two status rows) and the button fills it, so
+ * the whole target is really hittable instead of overflowing under the neighbours.
+ */
+function EngineButton({ engine, preference, onToggle }: { engine: Engine; preference: EnginePreference; onToggle: () => void }) {
+  const action = preference === "wasm" ? "Back to automatic" : "Switch to WebAssembly";
+  return (
+    <button
+      type="button"
+      data-engine={engine}
+      data-engine-preference={preference}
+      title={action}
+      aria-label={action}
+      onClick={onToggle}
+      className="-mx-1.5 -my-2 shrink-0 rounded px-1.5 py-2 font-mono text-[12px] leading-4 text-fg-faint transition-colors duration-200 ease-quint hover:bg-surface-2 hover:text-fg [@media(pointer:coarse)]:my-0 [@media(pointer:coarse)]:py-3.5"
+    >
+      {ENGINE_LABEL[engine]}
+    </button>
+  );
+}
+
+/**
  * Two mono spans: what is happening on the left, the numbers on the right. Rendered in the
- * stage footer on tablets and desktops and in its own row under the stage on phones.
+ * stage footer on tablets and desktops and in its own row under the stage on phones. Once a
+ * card is done (or failed) the left side is the engine button.
  */
 export function StatusLine({
   card,
   engine,
+  enginePreference,
+  onToggleEngine,
   download,
   waitingForModel,
   firstRun,
@@ -185,14 +226,16 @@ export function StatusLine({
 }: {
   card: Card;
   engine: Engine | null;
+  enginePreference: EnginePreference;
+  onToggleEngine: () => void;
   download: Download | null;
   waitingForModel: boolean;
   firstRun?: boolean;
   withName?: boolean;
 }) {
-  const label = ENGINE_LABEL[card.engine ?? engine ?? "wasm"];
   const known = card.engine ?? engine;
-  let left = "";
+  const label = <EngineButton engine={known ?? "wasm"} preference={enginePreference} onToggle={onToggleEngine} />;
+  let left: ReactNode = "";
   let right = "";
   let title: string | undefined;
   switch (card.state) {
@@ -234,8 +277,9 @@ export function StatusLine({
   }
   return (
     <>
-      {/* On phones the right side is short or empty, so the left may shrink there; elsewhere the name yields. */}
-      <span className="shrink-0 truncate max-sm:min-w-0 max-sm:shrink">{left}</span>
+      {/* On phones the right side is short or empty, so the left may shrink there; elsewhere the name yields.
+          The button stands on its own: a truncating span would clip its tap target. */}
+      {typeof left === "string" ? <span className="shrink-0 truncate max-sm:min-w-0 max-sm:shrink">{left}</span> : left}
       <span className="ml-auto min-w-0 truncate text-right" title={title}>
         {right}
       </span>

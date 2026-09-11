@@ -1,10 +1,30 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { detectEngine, preloadModel, type Engine, type Progress } from "@/lib/remove";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  getEnginePreference,
+  gpuFallbackReason,
+  preloadModel,
+  resolveEngine,
+  setEnginePreference,
+  subscribeEnginePreference,
+  type Engine,
+  type EnginePreference,
+  type Progress,
+} from "@/lib/remove";
 import { useToast } from "@/components/ui/toast";
 
 export type Download = { loaded: number; total: number };
+
+const FALLBACK_NOTICE = {
+  error: "WebGPU didn't work here, using WebAssembly instead.",
+  "wrong-result": "WebGPU gave a wrong result on this device, so the model runs on WebAssembly instead.",
+} as const;
+
+const PREFERENCE_NOTICE: Record<EnginePreference, string> = {
+  wasm: "The next photo runs on WebAssembly.",
+  auto: "The next photo picks the engine automatically.",
+};
 
 /**
  * Owns the model: which backend it runs on, the one-time download and its progress.
@@ -26,7 +46,10 @@ export function useEngine(opts: EngineOptions = {}) {
   useEffect(() => {
     optsRef.current = opts;
   });
+  /** The engine the next job will run on (null until detection finishes); the label under the photo. */
   const [engine, setEngine] = useState<Engine | null>(null);
+  // Module state in remove.ts (the URL, then localStorage); "auto" on the server so markup hydrates cleanly.
+  const preference = useSyncExternalStore(subscribeEnginePreference, getEnginePreference, () => "auto" as EnginePreference);
   const [download, setDownload] = useState<Download | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +60,7 @@ export function useEngine(opts: EngineOptions = {}) {
   useEffect(() => {
     let live = true;
     Promise.resolve()
-      .then(detectEngine)
+      .then(resolveEngine)
       .then((e) => {
         if (live) setEngine(e);
       })
@@ -49,19 +72,31 @@ export function useEngine(opts: EngineOptions = {}) {
     };
   }, []);
 
-  /** Called with the engine a finished job actually ran on; toasts once if WebGPU fell back. */
+  /** Called with the engine a finished job actually ran on; toasts once if WebGPU fell back, saying why. */
   const noteResult = useCallback(
     (used: Engine) => {
-      setEngine((prev) => {
-        if (prev === "webgpu" && used === "wasm" && !fellBack.current) {
-          fellBack.current = true;
-          queueMicrotask(() => push("info", "WebGPU didn't work here, using WebAssembly instead."));
-        }
-        return used;
-      });
+      const reason = used === "wasm" && !fellBack.current ? gpuFallbackReason() : null;
+      if (reason) {
+        fellBack.current = true;
+        push("info", FALLBACK_NOTICE[reason]);
+      }
+      // A job that ran on WebGPU says nothing about the next one once the preference is WebAssembly.
+      setEngine(used === "webgpu" && getEnginePreference() === "wasm" ? "wasm" : used);
     },
     [push],
   );
+
+  /** Flips auto <-> WebAssembly for the next job; the running one is left alone. */
+  const toggle = useCallback(() => {
+    const next: EnginePreference = getEnginePreference() === "wasm" ? "auto" : "wasm";
+    setEnginePreference(next);
+    push("info", PREFERENCE_NOTICE[next]);
+    resolveEngine()
+      .then(setEngine)
+      .catch(() => {
+        /* the label follows the next result instead */
+      });
+  }, [push]);
 
   const ensure = useCallback((): Promise<void> => {
     if (readyRef.current) return Promise.resolve();
@@ -97,6 +132,12 @@ export function useEngine(opts: EngineOptions = {}) {
           promise.current = null;
           setDownload(null);
           setError(e instanceof Error ? e.message : "model download failed");
+          // A WebGPU attempt that failed on the way to WebAssembly leaves the next job on WebAssembly; say so now.
+          resolveEngine()
+            .then(setEngine)
+            .catch(() => {
+              /* the label follows the next result instead */
+            });
           throw e;
         });
     }
@@ -105,7 +146,7 @@ export function useEngine(opts: EngineOptions = {}) {
 
   const isReady = useCallback(() => readyRef.current, []);
 
-  return { engine, download, ready, error, ensure, isReady, noteResult };
+  return { engine, preference, toggle, download, ready, error, ensure, isReady, noteResult };
 }
 
 export type EngineHandle = ReturnType<typeof useEngine>;

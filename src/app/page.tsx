@@ -37,6 +37,7 @@ function About() {
         <li>The model finds the subject and cuts the background away, right here in the browser.</li>
         <li>Pick a backdrop and download the PNG, or copy it.</li>
       </ol>
+      <p className="mt-4">If a cutout looks wrong, tap the engine name under the photo to switch to WebAssembly.</p>
       <p className="mt-4">
         Scripting it? The same cut is one HTTP call away: see{" "}
         <Link href="/docs" className="text-fg underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-fg">

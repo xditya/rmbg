@@ -390,14 +390,24 @@ export function Remover() {
               view={view}
               backdrop={backdrop}
               engine={engine.engine}
+              enginePreference={engine.preference}
+              onToggleEngine={engine.toggle}
               download={download}
               compare={compare}
               onCompare={setCompare}
               waitingForModel={waitingForModel}
               firstRun={firstRun}
             />
-            <div className="flex h-8 items-center gap-3 px-4 font-mono text-[12px] text-fg-faint sm:hidden">
-              <StatusLine card={selected} engine={engine.engine} download={download} waitingForModel={waitingForModel} firstRun={firstRun} />
+            <div className="flex h-8 items-center gap-3 px-4 font-mono text-[12px] text-fg-faint sm:hidden [@media(pointer:coarse)]:h-11">
+              <StatusLine
+                card={selected}
+                engine={engine.engine}
+                enginePreference={engine.preference}
+                onToggleEngine={engine.toggle}
+                download={download}
+                waitingForModel={waitingForModel}
+                firstRun={firstRun}
+              />
             </div>
             {notice && <Notice card={notice} onRetry={() => retryCard(notice.id)} onRemove={() => removeCard(notice.id)} className="max-sm:mx-4 max-sm:my-2 sm:mt-2" />}
 
