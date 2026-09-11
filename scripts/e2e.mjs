@@ -2,20 +2,29 @@
  * End-to-end smoke test: boots the production server, screenshots the empty and result states
  * at phone / tablet / desktop widths in both themes, runs one real image through the model
  * (WebAssembly in headless Chromium) to check the cutout has a transparent border and an
- * opaque subject, screenshots the docs page, and exercises the HTTP API (POST /api/v1/remove,
- * GET /api/v1/info) against the same server. The 429 check needs the default rate limit, so
- * it spawns one extra short-lived server on PORT + 1 with the limiter at its default.
+ * opaque subject, exercises the engine switch (the label button, its touch target,
+ * `?engine=wasm`) and the mask judge behind the WebGPU self-check, checks the headers of the
+ * frame the page runs WebGPU in, screenshots the docs page, and exercises the HTTP API
+ * (POST /api/v1/remove, GET /api/v1/info) against the same server. The 429 check needs the
+ * default rate limit, so it spawns one extra short-lived server on PORT + 1 with the limiter
+ * at its default.
  *
  *   pnpm build && pnpm e2e
  *
  * Environment: PORT (default 3111), SHOTS (screenshot directory), E2E_TIMEOUT_MS (model wait,
  * default 4 minutes), HTTPS_PROXY (forwarded to Chromium so the model CDN is reachable behind
- * an egress proxy). Never runs `playwright install`: it uses whatever Chromium Playwright
- * resolves from PLAYWRIGHT_BROWSERS_PATH.
+ * an egress proxy), E2E_CDN_CACHE (where the weights are kept between runs, see `cacheCdn`;
+ * `0` turns the cache off), E2E_WEBGPU=1 (turns on Chromium's software WebGPU adapter:
+ * detection must still pick WebAssembly, since it has no shader-f16, and a page whose adapter
+ * is made to claim the feature must be caught by the self-check and fall back). Never runs
+ * `playwright install`: it uses whatever Chromium Playwright resolves from
+ * PLAYWRIGHT_BROWSERS_PATH.
  */
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -30,6 +39,9 @@ const LIMIT_PORT = PORT + 1;
 const LIMIT_BASE = `http://localhost:${LIMIT_PORT}`;
 const SHOTS = resolve(process.env.SHOTS ?? resolve(ROOT, "e2e/screens"));
 const MODEL_TIMEOUT = Number(process.env.E2E_TIMEOUT_MS ?? 4 * 60 * 1000);
+/** The library's default publicPath: where the weights and the runtime come from. */
+const CDN = "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/";
+const CDN_CACHE = process.env.E2E_CDN_CACHE === "0" ? null : resolve(process.env.E2E_CDN_CACHE ?? resolve(tmpdir(), "rmbg-e2e-cdn"));
 
 const VIEWPORTS = [
   { name: "phone", width: 390, height: 844 },
@@ -127,22 +139,68 @@ async function launch() {
   }
 }
 
-/** A fresh context with the theme decided before the first paint (the ThemeScript reads localStorage). */
-async function newContext(browser, { width, height, theme }) {
-  const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1, colorScheme: theme });
+/** A fresh context with the theme decided before the first paint (the ThemeScript reads localStorage); `touch` emulates a touch screen (`pointer: coarse`). */
+async function newContext(browser, { width, height, theme, touch = false }) {
+  const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1, colorScheme: theme, hasTouch: touch });
   await ctx.addInitScript((t) => {
     try {
       localStorage.setItem("theme", t);
     } catch {}
   }, theme);
+  await cacheCdn(ctx);
   return ctx;
 }
 
+const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+const isChunk = (name) => /^[0-9a-f]{64}$/.test(name);
+const cdnStats = { hits: 0, misses: 0 };
+
+/**
+ * The model CDN, cached on disk between runs. Every context is a fresh profile with an empty
+ * HTTP cache, so without this each of the half-dozen contexts that run the model would fetch
+ * the weights again (55 MB on WebAssembly, 111 MB more on the spoofed WebGPU pass), which is
+ * what made the runs time out on a slow link. The chunks are content-addressed (the file name
+ * is the sha256 of the bytes), so a cached chunk is only served when it still checks out and
+ * a fetched one is only kept when it does; resources.json is always fetched live. The
+ * requests still go through Chromium's own network stack (and proxy) on a miss.
+ */
+async function cacheCdn(ctx) {
+  if (!CDN_CACHE) return;
+  mkdirSync(CDN_CACHE, { recursive: true });
+  await ctx.route(`${CDN}**`, async (route) => {
+    const name = route.request().url().slice(CDN.length).split("?")[0];
+    const file = resolve(CDN_CACHE, name);
+    try {
+      if (isChunk(name) && existsSync(file)) {
+        const body = readFileSync(file);
+        if (sha256(body) === name) {
+          cdnStats.hits++;
+          return await route.fulfill({ status: 200, contentType: "application/octet-stream", body });
+        }
+      }
+      // No timeout of our own: a 4 MB chunk can take minutes on a slow link, and the page has its own.
+      const response = await route.fetch({ timeout: 0 });
+      const body = await response.body();
+      if (response.ok() && isChunk(name) && sha256(body) === name) {
+        cdnStats.misses++;
+        writeFileSync(file, body);
+      }
+      return await route.fulfill({ response, body });
+    } catch (e) {
+      // The page went away mid-fetch (a navigation, a closed context), or the fetch failed: hand the
+      // request back to the browser, which reports it the way it would without the cache.
+      await route.continue().catch(() => {});
+      if (!/aborted|closed|Target page/i.test(String(e))) console.log(`info cdn cache: ${name.slice(0, 12)} not cached (${String(e).split("\n")[0]})`);
+    }
+  });
+}
+
 const problems = [];
-function watch(page, label) {
+/** `quiet` keeps console errors out of the report: the spoofed-WebGPU page raises hundreds of expected validation errors. */
+function watch(page, label, { quiet = false } = {}) {
   page.on("pageerror", (e) => problems.push(`${label} pageerror: ${e.message}`));
   page.on("console", (m) => {
-    if (m.type() === "error" || /Content Security Policy|CSP/i.test(m.text())) problems.push(`${label} console.${m.type()}: ${m.text()}`);
+    if (/Content Security Policy|CSP/i.test(m.text()) || (m.type() === "error" && !quiet)) problems.push(`${label} console.${m.type()}: ${m.text()}`);
   });
   page.on("requestfailed", (r) => {
     const f = r.failure()?.errorText ?? "";
@@ -175,18 +233,25 @@ async function layoutFacts(page) {
  * A shaded ball on a dark wall, drawn in-page so no fixture file is needed. The model is
  * trained on photographs: a flat disc on a pale gradient leaves it unsure and the mask comes
  * back hazy on both engines, while a lit sphere with a ground shadow is cut cleanly.
+ * 800x600 by default; with `size` the same picture is scaled into a square, which is what the
+ * app's WebGPU self-check draws (`drawSelfCheckImage` in src/lib/remove.ts, 256).
  */
-async function makeTestPng(page) {
-  const dataUrl = await page.evaluate(() => {
+async function makeTestPng(page, size = null) {
+  const dataUrl = await page.evaluate((size) => {
     const c = document.createElement("canvas");
-    c.width = 800;
-    c.height = 600;
+    c.width = size ?? 800;
+    c.height = size ?? 600;
     const ctx = c.getContext("2d");
+    if (size) {
+      const s = size / 600;
+      ctx.translate((size - 800 * s) / 2, 0);
+      ctx.scale(s, s);
+    }
     const wall = ctx.createLinearGradient(0, 0, 0, 600);
     wall.addColorStop(0, "#343a42");
     wall.addColorStop(1, "#22262c");
     ctx.fillStyle = wall;
-    ctx.fillRect(0, 0, 800, 600);
+    ctx.fillRect(-200, 0, 1200, 600);
     // a soft shadow on the ground under the ball
     ctx.save();
     ctx.translate(410, 550);
@@ -213,9 +278,94 @@ async function makeTestPng(page) {
     ctx.ellipse(340, 230, 45, 30, 0, 0, Math.PI * 2);
     ctx.fill();
     return c.toDataURL("image/png");
-  });
+  }, size);
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
+
+/* -------------------------------------------------------------- mask check */
+
+/**
+ * The app's pure mask judge (src/lib/mask-check.ts), run under plain node: the file has no
+ * imports and only bare `: number`-style annotations, so a small regex turns it into JavaScript.
+ */
+async function loadMaskCheck() {
+  const ts = readFileSync(resolve(ROOT, "src/lib/mask-check.ts"), "utf8");
+  const js = ts.replace(/^export type .*$/gm, "").replace(/: (Uint8ClampedArray|MaskStats|number|boolean)\b/g, "");
+  return import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+}
+
+/** A synthetic 256x256 RGBA mask: opaque inside a centred disc of `radius`, clear outside; `flat` fills everything with one alpha. */
+function syntheticMask({ radius = 0, flat = null } = {}) {
+  const size = 256;
+  const rgba = new Uint8ClampedArray(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const inside = Math.hypot(x - size / 2, y - size / 2) <= radius;
+      const a = flat ?? (inside ? 255 : 0);
+      rgba.set([194, 65, 12, a], (y * size + x) * 4);
+    }
+  }
+  return { rgba, size };
+}
+
+const fmtStats = (s) => `centre ${s.centre.toFixed(1)} corners ${s.corners.toFixed(1)} ring ${s.ring.toFixed(1)} allEqual ${s.allEqual}`;
+
+/** The judge on three masks it must get right: a clean ball, an all-transparent one (what a wrong WebGPU run gives) and an all-opaque one. */
+function maskCheckUnit({ maskLooksSane, maskStats }) {
+  const cases = [
+    { name: "ball", expect: true, ...syntheticMask({ radius: 100 }) },
+    { name: "all-transparent", expect: false, ...syntheticMask({ flat: 0 }) },
+    { name: "all-opaque", expect: false, ...syntheticMask({ flat: 255 }) },
+  ];
+  for (const c of cases) {
+    const ok = maskLooksSane(c.rgba, c.size, c.size);
+    check(ok === c.expect, `maskLooksSane(${c.name}) is ${c.expect} (${fmtStats(maskStats(c.rgba, c.size, c.size))})`);
+  }
+}
+
+/* ---------------------------------------------------------------- helpers */
+
+const DONE = "img[alt$=', background removed']";
+
+/** Collects toast texts while `work` runs: toasts dismiss themselves after about three seconds, so they are polled. */
+async function withToasts(page, work) {
+  const seen = new Set();
+  let running = true;
+  const poll = (async () => {
+    while (running) {
+      try {
+        for (const t of await page.evaluate(() => Array.from(document.querySelectorAll('[role="status"]')).map((e) => e.textContent?.trim() ?? ""))) seen.add(t);
+      } catch {}
+      await sleep(150);
+    }
+  })();
+  try {
+    return { result: await work(), toasts: [...seen] };
+  } finally {
+    running = false;
+    await poll;
+  }
+}
+
+/** The engine button under the photo: its label, the engine it names and the action it offers. */
+const engineButton = (page) =>
+  page.evaluate(() => {
+    const b = document.querySelector("button[data-engine]");
+    return b ? { label: b.textContent?.trim() ?? "", engine: b.getAttribute("data-engine"), action: b.getAttribute("title"), aria: b.getAttribute("aria-label") } : null;
+  });
+
+/** Straight RGBA of the cutout on the stage, as a plain array (the page cannot hand a typed array over). */
+const resultRgba = (page) =>
+  page.evaluate(async () => {
+    const img = document.querySelector("img[alt$=', background removed']");
+    const bmp = await createImageBitmap(await (await fetch(img.src)).blob());
+    const c = document.createElement("canvas");
+    c.width = bmp.width;
+    c.height = bmp.height;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(bmp, 0, 0);
+    return { width: bmp.width, height: bmp.height, data: Array.from(ctx.getImageData(0, 0, bmp.width, bmp.height).data) };
+  });
 
 /** Alpha over the outer 8 px of the image: the mean says whether the background is really clear, the max catches a stray blob. */
 function ringStats(alphaAt, w, h) {
@@ -274,7 +424,7 @@ async function runModel(browser) {
     try {
       return await page.evaluate(() => {
         const t = document.querySelector('nav[aria-label="Photo actions"]');
-        const lines = Array.from(document.querySelectorAll("span, p")).map((e) => e.textContent?.trim() ?? "");
+        const lines = Array.from(document.querySelectorAll("span, p, button[data-engine]")).map((e) => e.textContent?.trim() ?? "");
         return { title: document.title, status: lines.filter((l) => /downloading|removing|failed|WebAssembly|WebGPU|queued|waiting/i.test(l)).slice(0, 4), bar: !!t };
       });
     } catch {
@@ -345,7 +495,7 @@ async function runModel(browser) {
       corners: [at(2, 2), at(w - 3, 2), at(2, h - 3), at(w - 3, h - 3)],
       centre: at(Math.round(w / 2), Math.round(h / 2)),
       ring: { max: ringMax, mean: ringSum / ringN },
-      engine: Array.from(document.querySelectorAll("span")).map((s) => s.textContent).find((t) => t === "WebAssembly" || t === "WebGPU") ?? null,
+      engine: document.querySelector("button[data-engine]")?.textContent?.trim() ?? null,
     };
   });
   console.log(`info result ${pixels.width}x${pixels.height} engine=${pixels.engine} corners=${JSON.stringify(pixels.corners.map((c) => c[3]))} centre=${JSON.stringify(pixels.centre)} ring max ${pixels.ring.max} mean ${pixels.ring.mean.toFixed(2)}`);
@@ -353,10 +503,265 @@ async function runModel(browser) {
   check(pixels.corners.every((c) => c[3] === 0), "corners are transparent (alpha 0)");
   check(pixels.ring.mean < 1 && pixels.ring.max <= 64, `border is clear (alpha mean ${pixels.ring.mean.toFixed(2)}, max ${pixels.ring.max})`);
   check(pixels.centre[3] >= 250, `centre is opaque (alpha ${pixels.centre[3]})`);
-  check(pixels.engine === "WebAssembly" || pixels.engine === "WebGPU", `engine label shown (${pixels.engine})`);
+  // Chromium's software adapter (E2E_WEBGPU) has no shader-f16, so detection must land on WebAssembly there.
+  if (process.env.E2E_WEBGPU) check(pixels.engine === "WebAssembly", `engine label reads WebAssembly on the software adapter (${pixels.engine})`);
+  else check(pixels.engine === "WebAssembly" || pixels.engine === "WebGPU", `engine label shown (${pixels.engine})`);
+
+  await engineTogglePass(page, png);
 
   await ctx.close();
   return png;
+}
+
+/**
+ * The engine label is a button. One press: a toast, the action flips to "Back to automatic",
+ * the choice lands in localStorage and the next photo (a fresh load reads it at startup) runs
+ * on WebAssembly with its label saying so. A second press brings automatic detection back.
+ */
+async function engineTogglePass(page, png) {
+  const label = (s) => `engine switch: ${s}`;
+  const before = await engineButton(page);
+  check(before?.action === "Switch to WebAssembly" && before.aria === before.action, label(`button offers "Switch to WebAssembly" (${before?.action} / ${before?.aria})`));
+
+  const { toasts } = await withToasts(page, async () => {
+    await page.click("button[data-engine]");
+    await sleep(600);
+  });
+  check(toasts.includes("The next photo runs on WebAssembly."), label(`press toasts "The next photo runs on WebAssembly." (${JSON.stringify(toasts)})`));
+  const after = await engineButton(page);
+  check(after?.action === "Back to automatic", label(`action flips to "Back to automatic" (${after?.action})`));
+  const stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
+  check(stored === "wasm", label(`localStorage rmbg:engine is "wasm" (${stored})`));
+
+  // The next photo, on a fresh load of the same context: the stored choice is read at startup.
+  await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  await page.setInputFiles("#pick", { name: "disc2.png", mimeType: "image/png", buffer: png });
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(label("next photo reaches done state"));
+    return;
+  }
+  const next = await engineButton(page);
+  check(next?.label === "WebAssembly" && next.engine === "wasm", label(`next photo ran on WebAssembly (${next?.label})`));
+  check(next?.action === "Back to automatic", label(`the choice survived the reload (${next?.action})`));
+
+  const back = await withToasts(page, async () => {
+    await page.click("button[data-engine]");
+    await sleep(600);
+  });
+  check(back.toasts.includes("The next photo picks the engine automatically."), label(`second press toasts "The next photo picks the engine automatically." (${JSON.stringify(back.toasts)})`));
+  const reset = await engineButton(page);
+  const storedBack = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
+  check(reset?.action === "Switch to WebAssembly" && storedBack === "auto", label(`back to automatic (${reset?.action}, stored ${storedBack})`));
+}
+
+/**
+ * `?engine=wasm` forces WebAssembly for the visit without persisting it. Then, on the same
+ * warm context, the app's own self-check picture (the 256 px ball) goes through the model so
+ * the numbers the check would see on the WebAssembly path are printed and judged with the
+ * same function the app uses: the thresholds must accept a right mask from the real model.
+ */
+async function enginePass(browser, maskCheck) {
+  const label = (s) => `engine query: ${s}`;
+  const ctx = await newContext(browser, { ...VIEWPORTS[2], theme: "light" });
+  const page = await ctx.newPage();
+  watch(page, "engine-query");
+  await page.goto(`${BASE}/?engine=wasm`, { waitUntil: "networkidle" });
+  const png = await makeTestPng(page);
+  await page.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(label("photo reaches done state"));
+    await ctx.close();
+    return;
+  }
+  const b = await engineButton(page);
+  check(b?.label === "WebAssembly" && b.engine === "wasm", label(`label reads WebAssembly (${b?.label})`));
+  check(b?.action === "Back to automatic", label(`button offers "Back to automatic" (${b?.action})`));
+  const stored = await page.evaluate(() => localStorage.getItem("rmbg:engine"));
+  check(stored === null, label(`nothing persisted to localStorage (${stored})`));
+
+  // The self-check picture on the WebAssembly path.
+  const selfLabel = (s) => `self-check picture on wasm: ${s}`;
+  await page.goto(`${BASE}/?engine=wasm`, { waitUntil: "networkidle" });
+  const ball = await makeTestPng(page, 256);
+  await page.setInputFiles("#pick", { name: "ball256.png", mimeType: "image/png", buffer: ball });
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(selfLabel("reaches done state"));
+    await ctx.close();
+    return;
+  }
+  await sleep(300);
+  const { width, height, data } = await resultRgba(page);
+  const rgba = Uint8ClampedArray.from(data);
+  const stats = maskCheck.maskStats(rgba, width, height);
+  console.log(`info self-check picture on wasm ${width}x${height}: ${fmtStats(stats)} (limits centre >= ${maskCheck.MASK_LIMITS.centreMin}, corners <= ${maskCheck.MASK_LIMITS.cornersMax}, ring <= ${maskCheck.MASK_LIMITS.ringMax})`);
+  check(width === 256 && height === 256, selfLabel("keeps its size"));
+  check(maskCheck.maskLooksSane(rgba, width, height), selfLabel(`maskLooksSane accepts the real mask (${fmtStats(stats)})`));
+  await ctx.close();
+}
+
+/**
+ * The self-check itself, which headless Chromium cannot reach on its own (its software
+ * adapter has no shader-f16, so detection never picks WebGPU). The page's adapter is made to
+ * claim the feature; ONNX Runtime's worker still sees the real one and, as before the check
+ * existed, returns an all-transparent mask. The check must catch it: the notice names the
+ * wrong result, the photo is redone on WebAssembly and the cutout is right.
+ */
+async function gpuSelfCheckPass(browser, png) {
+  const label = (s) => `webgpu self-check: ${s}`;
+  const ctx = await newContext(browser, { ...VIEWPORTS[2], theme: "light" });
+  await ctx.addInitScript(() => {
+    const gpu = navigator.gpu;
+    if (!gpu) return;
+    const real = gpu.requestAdapter.bind(gpu);
+    gpu.requestAdapter = async (...args) => {
+      const adapter = await real(...args);
+      if (!adapter) return adapter;
+      const features = { has: (name) => name === "shader-f16" || adapter.features.has(name), [Symbol.iterator]: () => adapter.features[Symbol.iterator]() };
+      return new Proxy(adapter, {
+        get(target, key) {
+          if (key === "features") return features;
+          const v = Reflect.get(target, key);
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+    };
+  });
+  const page = await ctx.newPage();
+  watch(page, "webgpu-spoof", { quiet: true });
+  await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  const spoofed = await page.evaluate(async () => (await navigator.gpu?.requestAdapter())?.features.has("shader-f16") ?? null);
+  check(spoofed === true, label(`page adapter claims shader-f16 (${spoofed})`));
+
+  await page.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
+  const t0 = Date.now();
+  const { result: done, toasts } = await withToasts(page, async () => {
+    try {
+      await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  check(done, label(`photo reaches done state in ${Math.round((Date.now() - t0) / 1000)}s`));
+  if (!done) {
+    await page.screenshot({ path: `${SHOTS}/webgpu-selfcheck-failed.png` });
+    await ctx.close();
+    return;
+  }
+  console.log(`info webgpu self-check toasts ${JSON.stringify(toasts)}`);
+  check(toasts.includes("WebGPU gave a wrong result on this device, so the model runs on WebAssembly instead."), label("fallback notice names the wrong result"));
+  const b = await engineButton(page);
+  check(b?.label === "WebAssembly", label(`label reads WebAssembly after the fallback (${b?.label})`));
+  // The page ran WebGPU in its frame and closed it on the way to WebAssembly; the frame held the weights.
+  const frames = await page.evaluate(() => document.querySelectorAll('iframe[src="/gpu-frame"]').length);
+  check(frames === 0, label(`the WebGPU frame is gone after the fallback (${frames} left)`));
+  await sleep(300);
+  const { width, height, data } = await resultRgba(page);
+  const alpha = (x, y) => data[(y * width + x) * 4 + 3];
+  const corners = [alpha(2, 2), alpha(width - 3, 2), alpha(2, height - 3), alpha(width - 3, height - 3)];
+  const centre = alpha(Math.round(width / 2), Math.round(height / 2));
+  const ring = ringStats(alpha, width, height);
+  console.log(`info webgpu self-check result ${width}x${height} corners=${JSON.stringify(corners)} centre alpha ${centre} ring max ${ring.max} mean ${ring.mean.toFixed(2)}`);
+  check(corners.every((a) => a === 0), label("corners are transparent (alpha 0)"));
+  check(ring.mean < 1 && ring.max <= 64, label(`border is clear (alpha mean ${ring.mean.toFixed(2)}, max ${ring.max})`));
+  check(centre >= 250, label(`centre is opaque (alpha ${centre})`));
+  await page.screenshot({ path: `${SHOTS}/webgpu-selfcheck-fallback.png` });
+
+  // A second photo in the same session goes straight to WebAssembly, with no second notice. Adding
+  // does not move the selection, so its row in the queue list is clicked to bring it on stage.
+  const second = await withToasts(page, async () => {
+    await page.setInputFiles("#pick", { name: "disc2.png", mimeType: "image/png", buffer: png });
+    try {
+      await page.click('ul[aria-label="Queue"] button:has-text("disc2.png")', { timeout: 10_000 });
+      await page.waitForSelector("img[alt='disc2.png, background removed']", { timeout: MODEL_TIMEOUT });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  check(second.result, label("a second photo reaches done state on WebAssembly"));
+  check(!second.toasts.some((t) => /WebGPU/.test(t)), label(`no second notice (${JSON.stringify(second.toasts)})`));
+  await ctx.close();
+}
+
+/**
+ * The page runs WebGPU in a hidden frame of its own route, so that route alone may be framed
+ * by the site itself, and nothing else may be framed at all.
+ */
+async function framePass() {
+  const label = (s) => `gpu frame: ${s}`;
+  const frame = await call(`${BASE}/gpu-frame`);
+  const csp = frame.headers.get("content-security-policy") ?? "";
+  check(frame.status === 200, label(`/gpu-frame answers 200 (${frame.status})${why(frame)}`));
+  check(frame.headers.get("x-frame-options") === "SAMEORIGIN", label(`/gpu-frame is framable by the site (X-Frame-Options ${frame.headers.get("x-frame-options")})`));
+  check(/frame-ancestors 'self'/.test(csp), label("/gpu-frame CSP has frame-ancestors 'self'"));
+  const home = await call(`${BASE}/`);
+  const homeCsp = home.headers.get("content-security-policy") ?? "";
+  check(home.headers.get("x-frame-options") === "DENY" && /frame-ancestors 'none'/.test(homeCsp), label(`the page itself stays unframable (X-Frame-Options ${home.headers.get("x-frame-options")})`));
+}
+
+/**
+ * On a touch screen the engine button must be hittable over all of its 44px: the status rows
+ * grow to that height under `pointer: coarse` so no neighbour paints over it. Measured the way
+ * a finger lands: `elementFromPoint` down the middle of the button, then a real tap 2px inside
+ * the top and the bottom edge, each of which must flip the preference. The phone row (under
+ * the stage) and the tablet row (the stage footer) are different elements, so both widths.
+ */
+async function engineTapPass(browser, png) {
+  const label = (s) => `engine tap target: ${s}`;
+  const ctx = await newContext(browser, { width: 390, height: 844, theme: "light", touch: true });
+  const page = await ctx.newPage();
+  watch(page, "engine-tap");
+  await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
+  const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
+  check(coarse, label(`context emulates a touch screen (pointer: coarse ${coarse})`));
+  await page.setInputFiles("#pick", { name: "disc.png", mimeType: "image/png", buffer: png });
+  try {
+    await page.waitForSelector(DONE, { timeout: MODEL_TIMEOUT });
+  } catch {
+    fail(label("photo reaches done state"));
+    await ctx.close();
+    return;
+  }
+  const measure = () =>
+    page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll("button[data-engine]")).find((e) => e.getClientRects().length > 0);
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      // Pixel centres down the box; layout snaps the box to whole pixels, so one row of rounding is allowed.
+      let hit = 0;
+      for (let y = Math.floor(r.top) + 0.5; y < r.bottom; y++) if (b.contains(document.elementFromPoint(x, y))) hit++;
+      return { height: Math.round(r.height), hit, x, top: r.top, bottom: r.bottom, preference: b.getAttribute("data-engine-preference") };
+    });
+  for (const vp of [
+    { name: "phone", width: 390, height: 844 },
+    { name: "tablet", width: 820, height: 1180 },
+  ]) {
+    await page.setViewportSize({ width: vp.width, height: vp.height });
+    await sleep(300);
+    const m = await measure();
+    check(m !== null && m.height >= 44 && m.hit >= 43, label(`${vp.name}: button is ${m?.height}px tall and hittable over ${m?.hit}px of it`));
+    if (!m) continue;
+    for (const [edge, y] of [
+      ["top", m.top + 2],
+      ["bottom", m.bottom - 2],
+    ]) {
+      const before = (await measure())?.preference;
+      await page.touchscreen.tap(m.x, y);
+      await sleep(400);
+      const after = (await measure())?.preference;
+      check(before !== after, label(`${vp.name}: a tap 2px inside the ${edge} edge flips the preference (${before} -> ${after})`));
+    }
+  }
+  await page.screenshot({ path: `${SHOTS}/phone-touch-status.png` });
+  await ctx.close();
 }
 
 /**
@@ -639,6 +1044,8 @@ async function rateLimitPass() {
 }
 
 async function main() {
+  const maskCheck = await loadMaskCheck();
+  maskCheckUnit(maskCheck);
   await ensureServer();
   const browser = await launch();
   let png = null;
@@ -646,6 +1053,9 @@ async function main() {
     await shootEmpty(browser);
     await shootDocs(browser);
     png = await runModel(browser);
+    await enginePass(browser, maskCheck);
+    if (png) await engineTapPass(browser, png);
+    if (png && process.env.E2E_WEBGPU) await gpuSelfCheckPass(browser, png);
     if (png) await shootResult(browser, png);
     else {
       // The API checks need the test image even when the in-browser model did not finish.
@@ -656,6 +1066,8 @@ async function main() {
   } finally {
     await browser.close();
   }
+  if (CDN_CACHE) console.log(`info model CDN cache at ${CDN_CACHE}: ${cdnStats.hits} chunks served from disk, ${cdnStats.misses} fetched and kept`);
+  await framePass();
   await apiPass(png);
   await rateLimitPass();
   const relevant = problems.filter((p) => !/favicon/.test(p));
