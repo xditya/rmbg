@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { GPU_FRAME_PATH } from "@/lib/config";
 
 /**
  * Security headers and a nonce-based Content Security Policy for every page response.
@@ -8,13 +9,13 @@ import { NextResponse, type NextRequest } from "next/server";
  * workers, it loads its own .wasm binary through fetch() from a blob: URL it minted itself
  * (so connect-src needs blob:), the library's ndarray dependency needs 'unsafe-eval', and the
  * weights are fetched from imgly's CDN. Those are the only holes in the policy. No other
- * origin is ever contacted.
+ * origin is ever contacted. Nothing may frame the site except the site itself framing its
+ * own WebGPU route (`GPU_FRAME_PATH`), which the page opens hidden to run the model in.
  */
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Permissions-Policy": "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
-  "X-Frame-Options": "DENY",
 };
 
 const MODEL_CDN = "https://staticimgly.com";
@@ -22,6 +23,7 @@ const MODEL_CDN = "https://staticimgly.com";
 export function proxy(request: NextRequest) {
   const isDev = process.env.NODE_ENV === "development";
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  const framed = request.nextUrl.pathname === GPU_FRAME_PATH;
 
   const csp = [
     "default-src 'self'",
@@ -38,7 +40,7 @@ export function proxy(request: NextRequest) {
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",
+    `frame-ancestors ${framed ? "'self'" : "'none'"}`,
     "upgrade-insecure-requests",
   ].join("; ");
 
@@ -48,6 +50,7 @@ export function proxy(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) response.headers.set(k, v);
+  response.headers.set("X-Frame-Options", framed ? "SAMEORIGIN" : "DENY");
   response.headers.set("Content-Security-Policy", csp);
   return response;
 }

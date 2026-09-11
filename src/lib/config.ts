@@ -22,6 +22,14 @@ export const LIMITS = {
   apiMaxPixels: 40_000_000,
 } as const;
 
+/**
+ * The route the page frames to run WebGPU in (see `src/lib/remove.ts`): a hidden same-origin
+ * iframe, so a failed or wrong WebGPU attempt never touches this page's ONNX Runtime and the
+ * WebAssembly fallback always starts from a clean one. The CSP in `src/proxy.ts` lets this
+ * one path be framed by the site itself.
+ */
+export const GPU_FRAME_PATH = "/gpu-frame";
+
 /** The HTTP API (`/api/v1`). The engine runs on the server with the WebAssembly-path weights. */
 export const API = {
   path: "/api/v1/remove",

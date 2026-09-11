@@ -6,7 +6,8 @@
  */
 
 import type { Config } from "@imgly/background-removal";
-import { LIMITS, MODEL_FILES } from "@/lib/config";
+import { GPU_FRAME_PATH, LIMITS, MODEL_FILES } from "@/lib/config";
+import { maskLooksSane } from "@/lib/mask-check";
 
 /** Which backend ONNX Runtime ended up on. */
 export type Engine = "webgpu" | "wasm";
@@ -47,15 +48,19 @@ function abortError(): DOMException {
  * ---------------------------------------------------------------------------------------------- */
 
 /** The DOM lib does not ship WebGPU types; this is the sliver of the API we probe. */
-type GpuNavigator = Navigator & { gpu?: { requestAdapter(): Promise<unknown | null> } };
+type GpuAdapter = { features: { has(name: string): boolean } };
+type GpuNavigator = Navigator & { gpu?: { requestAdapter(): Promise<GpuAdapter | null> } };
 
 let enginePromise: Promise<Engine> | undefined;
 
+/** Why WebGPU was given up on: it threw, or its self-check came back with a wrong mask. */
+export type GpuFallbackReason = "error" | "wrong-result";
+
 /**
- * Set once a `gpu` run has thrown. From then on every call goes straight to WebAssembly and
- * `detectEngine()` answers "wasm" so the UI footer stays truthful.
+ * Set once a `gpu` run has thrown or failed its self-check. From then on every call goes
+ * straight to WebAssembly and `detectEngine()` answers "wasm" so the UI footer stays truthful.
  */
-let gpuFailed = false;
+let gpuFailure: GpuFallbackReason | null = null;
 
 /** Probes WebGPU once and remembers the answer. Never throws. */
 export function detectEngine(): Promise<Engine> {
@@ -65,26 +70,92 @@ export function detectEngine(): Promise<Engine> {
   return enginePromise;
 }
 
+/**
+ * WebGPU only counts when the adapter has f16 shaders: the WebGPU build runs the fp16 model,
+ * and ONNX Runtime runs it on an adapter without the feature anyway, returning garbage (an
+ * all-transparent cutout on Chromium's software adapter, wrong edges on some drivers).
+ */
 async function probeWebGpu(): Promise<Engine> {
   try {
     if (typeof navigator === "undefined") return "wasm";
     const gpu = (navigator as GpuNavigator).gpu;
     if (!gpu) return "wasm";
     const adapter = await gpu.requestAdapter();
-    return adapter ? "webgpu" : "wasm";
+    return adapter?.features?.has("shader-f16") ? "webgpu" : "wasm";
   } catch {
     return "wasm";
   }
 }
 
-function rememberGpuFailure(): void {
-  gpuFailed = true;
+/**
+ * The first reason wins: a later "error" must not hide that the self-check was what failed.
+ * The frame goes with it: its session would never be used again, and it holds the weights.
+ */
+function rememberGpuFailure(reason: GpuFallbackReason): void {
+  gpuFailure ??= reason;
   enginePromise = Promise.resolve("wasm");
+  closeGpuFrame();
 }
 
-/** The engine we will actually hand to the library right now. */
-async function effectiveEngine(): Promise<Engine> {
-  if (gpuFailed) return "wasm";
+/** Why the session left WebGPU, or null while it has not. Lets the UI word its notice. */
+export function gpuFallbackReason(): GpuFallbackReason | null {
+  return gpuFailure;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Engine preference
+ * ---------------------------------------------------------------------------------------------- */
+
+/** "auto" lets detection decide; "wasm" skips WebGPU for every job. */
+export type EnginePreference = "auto" | "wasm";
+
+/** localStorage key of the preference; `?engine=wasm` in the URL overrides it for one visit. */
+export const ENGINE_PREFERENCE_KEY = "rmbg:engine";
+
+let preference: EnginePreference | undefined;
+
+function readPreference(): EnginePreference {
+  if (typeof window === "undefined") return "auto";
+  try {
+    const query = new URLSearchParams(window.location.search).get("engine");
+    if (query === "wasm" || query === "auto") return query;
+    if (window.localStorage.getItem(ENGINE_PREFERENCE_KEY) === "wasm") return "wasm";
+  } catch {
+    /* no storage (private mode, blocked): the default */
+  }
+  return "auto";
+}
+
+/** Read once per session: the URL first, then localStorage, else "auto". */
+export function getEnginePreference(): EnginePreference {
+  preference ??= readPreference();
+  return preference;
+}
+
+const preferenceListeners = new Set<() => void>();
+
+/** Persists the choice and applies it to the next job; a running one is left alone. */
+export function setEnginePreference(next: EnginePreference): void {
+  preference = next;
+  try {
+    window.localStorage.setItem(ENGINE_PREFERENCE_KEY, next);
+  } catch {
+    /* the choice still holds for this visit */
+  }
+  for (const listener of preferenceListeners) listener();
+}
+
+/** For `useSyncExternalStore`: called after every `setEnginePreference`. */
+export function subscribeEnginePreference(listener: () => void): () => void {
+  preferenceListeners.add(listener);
+  return () => {
+    preferenceListeners.delete(listener);
+  };
+}
+
+/** The engine the next job will actually run on: the preference, then the failure memory, then detection. */
+export async function resolveEngine(): Promise<Engine> {
+  if (getEnginePreference() === "wasm" || gpuFailure) return "wasm";
   return detectEngine();
 }
 
@@ -105,6 +176,14 @@ function dispatchProgress(key: string, current: number, total: number): void {
   for (const listener of listeners) listener(key, current, total);
 }
 
+/** Subscribes to the library's raw progress stream (the frame relays it to the page); returns the unsubscribe. */
+export function onRawProgress(listener: RawProgress): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 /**
  * Bumped after a failed init. The library memoises `initInference` by `JSON.stringify(config)`
  * and caches the rejected promise too, so without a new key every retry after an offline first
@@ -113,7 +192,7 @@ function dispatchProgress(key: string, current: number, total: number): void {
  */
 let attempt = 0;
 
-function libraryConfig(engine: Engine): Config {
+export function libraryConfig(engine: Engine): Config {
   return {
     device: engine === "webgpu" ? "gpu" : "cpu",
     model: engine === "webgpu" ? "isnet_fp16" : "isnet_quint8",
@@ -128,7 +207,7 @@ function libraryConfig(engine: Engine): Config {
 }
 
 /** `lib.preload` that makes the next try a real one when this one fails. */
-async function initLibrary(lib: Library, config: Config): Promise<void> {
+export async function initLibrary(lib: Library, config: Config): Promise<void> {
   try {
     await lib.preload(config);
   } catch (error) {
@@ -143,6 +222,7 @@ async function initLibrary(lib: Library, config: Config): Promise<void> {
  * wraps backend failures as "Failed to create session: ..." and raises fetch problems raw.
  */
 export function isTransferError(error: unknown): boolean {
+  if (error instanceof GpuFrameError) return error.transfer;
   const msg = error instanceof Error ? error.message : String(error);
   if (/create session/i.test(msg)) return false;
   return error instanceof TypeError || /Failed to fetch|Resource .*not found|Load failed|NetworkError/i.test(msg);
@@ -176,9 +256,9 @@ function makeProgressMapper(engine: Engine, onProgress?: (p: Progress) => void):
   };
 }
 
-type Library = typeof import("@imgly/background-removal");
+export type Library = typeof import("@imgly/background-removal");
 
-function loadLibrary(): Promise<Library> {
+export function loadLibrary(): Promise<Library> {
   return import("@imgly/background-removal");
 }
 
@@ -213,24 +293,25 @@ export function withAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
 /**
  * Fetches and warms the model so the first image doesn't pay for it. Safe to call many times.
  * Resolves with the engine that actually came up, which is "wasm" after a WebGPU fallback.
+ * On WebGPU the frame does the fetching and warming, and its first run is the self-check.
  */
 export async function preloadModel(onProgress?: (p: Progress) => void): Promise<Engine> {
-  const lib = await loadLibrary();
-  let engine = await effectiveEngine();
+  let engine = await resolveEngine();
   let raw = makeProgressMapper(engine, onProgress);
   listeners.add(raw);
   try {
     try {
-      await initLibrary(lib, libraryConfig(engine));
+      if (engine === "webgpu") await verifyGpuOnce();
+      else await initLibrary(await loadLibrary(), libraryConfig(engine));
     } catch (error) {
       if (engine !== "webgpu" || isTransferError(error)) throw error;
-      rememberGpuFailure();
+      rememberGpuFailure("error");
       // A fresh mapper: the WebAssembly files must not be added on top of the WebGPU total.
       listeners.delete(raw);
       engine = "wasm";
       raw = makeProgressMapper(engine, onProgress);
       listeners.add(raw);
-      await initLibrary(lib, libraryConfig(engine));
+      await initLibrary(await loadLibrary(), libraryConfig(engine));
     }
     return engine;
   } finally {
@@ -243,7 +324,16 @@ export async function preloadModel(onProgress?: (p: Progress) => void): Promise<
  * ---------------------------------------------------------------------------------------------- */
 
 /** The subset of the 2D context both `OffscreenCanvas` and `<canvas>` share and that we use. */
-type Ctx = CanvasDrawImage & CanvasRect & CanvasFillStrokeStyles & CanvasFilters & CanvasImageSmoothing & CanvasState;
+type Ctx = CanvasDrawImage &
+  CanvasRect &
+  CanvasFillStrokeStyles &
+  CanvasFilters &
+  CanvasImageSmoothing &
+  CanvasState &
+  CanvasPath &
+  CanvasDrawPath &
+  CanvasTransform &
+  CanvasImageData;
 
 type Surface = { canvas: OffscreenCanvas | HTMLCanvasElement; ctx: Ctx };
 
@@ -345,8 +435,9 @@ export async function downscaleIfNeeded(file: Blob, maxEdge: number): Promise<Bl
 
 /**
  * Removes the background. Downloads the model on first use (reported through onProgress), runs
- * WebGPU when available and falls back to WebAssembly once if WebGPU fails. Rejects with
- * DOMException "AbortError" when the signal fires.
+ * WebGPU when available (and the engine preference allows it) and falls back to WebAssembly
+ * once if WebGPU fails or fails its self-check. Rejects with DOMException "AbortError" when
+ * the signal fires.
  */
 export async function removeBackground(
   file: Blob,
@@ -359,13 +450,13 @@ export async function removeBackground(
   const input = await fit(file, LIMITS.maxEdge);
   if (signal?.aborted) throw abortError();
 
-  const engine = await effectiveEngine();
+  const engine = await resolveEngine();
   try {
     return await runOnce(lib, engine, input, opts);
   } catch (error) {
     if (engine !== "webgpu" || signal?.aborted || isAbort(error) || isTransferError(error)) throw error;
-    // WebGPU init or inference blew up: remember it and give WebAssembly one go on this image.
-    rememberGpuFailure();
+    // WebGPU init, its self-check or the inference blew up: remember it and give WebAssembly one go on this image.
+    rememberGpuFailure("error");
     return runOnce(lib, "wasm", input, opts);
   }
 }
@@ -381,11 +472,22 @@ async function runOnce(
   opts?: { signal?: AbortSignal; onProgress?: (p: Progress) => void },
 ): Promise<RemoveResult> {
   const signal = opts?.signal;
-  const config = libraryConfig(engine);
   const raw = makeProgressMapper(engine, opts?.onProgress);
   listeners.add(raw);
   try {
-    await withAbort(initLibrary(lib, config), signal);
+    let run: () => Promise<Blob>;
+    if (engine === "webgpu") {
+      // The self-check covers the preload in the normal flow; here for callers that skipped it
+      // or switched the preference back to automatic mid-session. Rejects on a wrong mask, like
+      // a thrown run. The frame it opened then takes the photo.
+      await withAbort(verifyGpuOnce(), signal);
+      const frame = await gpuFrame();
+      run = () => frame.run(input.blob);
+    } else {
+      const config = libraryConfig(engine);
+      await withAbort(initLibrary(lib, config), signal);
+      run = () => lib.removeBackground(input.blob, config);
+    }
 
     // The library cannot cancel a running job, so on abort we let it finish in the background and
     // simply refuse to hand the result over. The swallowed catch avoids an unhandled rejection.
@@ -396,7 +498,7 @@ async function runOnce(
     const work = serial(() => {
       if (signal?.aborted) return Promise.reject(abortError());
       t0 = performance.now();
-      return lib.removeBackground(input.blob, config);
+      return run();
     });
     work.catch(() => {});
     const blob = await withAbort(work, signal);
@@ -407,6 +509,267 @@ async function runOnce(
   } finally {
     listeners.delete(raw);
   }
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * The WebGPU frame
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * WebGPU never runs in this document: it runs in a hidden same-origin iframe at `GPU_FRAME_PATH`
+ * (the frame side is `src/lib/gpu-frame.ts`). ONNX Runtime keeps one global "initialized"
+ * flag per document, and the library's WebGPU configuration runs it through a proxy worker;
+ * once that init has happened (or failed) here, a later WebAssembly session in the same
+ * document cannot start ("WebAssembly is not initialized yet", "previous call to initWasm()
+ * failed"), so a fallback after any WebGPU attempt, thrown or wrong, would be stuck. With the
+ * attempt in its own document this page's runtime stays clean for WebAssembly. The weights
+ * are fetched once: the frame shares the browser's HTTP cache, and the CDN marks them cacheable.
+ *
+ * The protocol is one request at a time (`serial` chains the runs) with a progress relay;
+ * `id` ties replies and progress to their request.
+ */
+
+/** The `type` of every message either way; anything else on the window is ignored. */
+export const FRAME_MESSAGE = "rmbg:gpu";
+
+/** What the page asks of the frame: warm the model, or run it on a picture. */
+export type FrameOp = { op: "preload" } | { op: "run"; blob: Blob };
+
+export type FrameRequest = { type: typeof FRAME_MESSAGE; id: number } & FrameOp;
+
+export type FrameReply =
+  | { type: typeof FRAME_MESSAGE; phase: "ready" }
+  | { type: typeof FRAME_MESSAGE; phase: "progress"; id: number; key: string; current: number; total: number }
+  | { type: typeof FRAME_MESSAGE; phase: "done"; id: number; blob?: Blob }
+  | { type: typeof FRAME_MESSAGE; phase: "error"; id: number; message: string; transfer: boolean };
+
+/**
+ * A failure reported by the frame, or the frame itself not answering. `transfer` says whether
+ * it was the network (the frame judged its own error with `isTransferError`; a frame that never
+ * loaded counts too, since the page could not reach its own route), so the caller keeps WebGPU.
+ */
+class GpuFrameError extends Error {
+  constructor(
+    message: string,
+    readonly transfer: boolean,
+  ) {
+    super(message);
+    this.name = "GpuFrameError";
+  }
+}
+
+type GpuFrame = {
+  /** Fetches and warms the model in the frame. */
+  preload(): Promise<void>;
+  /** Runs the model on `blob`; `quiet` keeps the run's compute progress off this page (the self-check). */
+  run(blob: Blob, opts?: { quiet?: boolean }): Promise<Blob>;
+  close(): void;
+};
+
+/** How long the frame gets to load and say "ready": its own route on the same origin, so seconds. */
+const FRAME_READY_MS = 30_000;
+
+let frameOpening: Promise<GpuFrame> | undefined;
+let frameOpen: GpuFrame | null = null;
+
+/** The frame, opened on first use and kept for the session (it holds the resident session). */
+function gpuFrame(): Promise<GpuFrame> {
+  if (!frameOpening) {
+    frameOpening = openGpuFrame().catch((error: unknown) => {
+      frameOpening = undefined;
+      throw error;
+    });
+  }
+  return frameOpening;
+}
+
+function closeGpuFrame(): void {
+  frameOpen?.close();
+}
+
+function isFrameReply(data: unknown): data is FrameReply {
+  return typeof data === "object" && data !== null && (data as { type?: unknown }).type === FRAME_MESSAGE;
+}
+
+function openGpuFrame(): Promise<GpuFrame> {
+  return new Promise<GpuFrame>((resolveOpen, rejectOpen) => {
+    const frame = document.createElement("iframe");
+    frame.src = GPU_FRAME_PATH;
+    frame.title = "WebGPU engine";
+    frame.tabIndex = -1;
+    frame.setAttribute("aria-hidden", "true");
+    // Off the page but not display:none, which some browsers take as a reason not to load a frame.
+    frame.style.cssText = "position:absolute;width:0;height:0;border:0;overflow:hidden;visibility:hidden;pointer-events:none";
+
+    type Pending = { resolve: (blob?: Blob) => void; reject: (error: Error) => void; quiet: boolean };
+    const pending = new Map<number, Pending>();
+    let nextId = 0;
+    let ready = false;
+
+    const close = () => {
+      clearTimeout(readyTimer);
+      window.removeEventListener("message", onMessage);
+      frame.remove();
+      if (frameOpen === client) frameOpen = null;
+      frameOpening = undefined;
+      const gone = new GpuFrameError("The WebGPU frame was closed.", false);
+      for (const p of pending.values()) p.reject(gone);
+      pending.clear();
+      if (!ready) rejectOpen(new GpuFrameError("The WebGPU frame did not load.", true));
+    };
+
+    const readyTimer = setTimeout(close, FRAME_READY_MS);
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frame.contentWindow || event.origin !== location.origin || !isFrameReply(event.data)) return;
+      const reply = event.data;
+      switch (reply.phase) {
+        case "ready":
+          if (ready) return;
+          ready = true;
+          clearTimeout(readyTimer);
+          frameOpen = client;
+          resolveOpen(client);
+          return;
+        case "progress":
+          // The self-check's inference must not read as a run on this page; its download is the model's.
+          if (!pending.get(reply.id)?.quiet || reply.key.startsWith("fetch:")) dispatchProgress(reply.key, reply.current, reply.total);
+          return;
+        case "done":
+          pending.get(reply.id)?.resolve(reply.blob);
+          pending.delete(reply.id);
+          return;
+        case "error":
+          pending.get(reply.id)?.reject(new GpuFrameError(reply.message, reply.transfer));
+          pending.delete(reply.id);
+          return;
+      }
+    };
+
+    const call = (op: FrameOp, quiet = false) =>
+      new Promise<Blob | undefined>((resolve, reject) => {
+        const id = nextId++;
+        pending.set(id, { resolve, reject, quiet });
+        const request: FrameRequest = { type: FRAME_MESSAGE, id, ...op };
+        frame.contentWindow?.postMessage(request, location.origin);
+      });
+
+    const client: GpuFrame = {
+      preload: () => call({ op: "preload" }).then(() => undefined),
+      run: async (blob, opts) => {
+        const out = await call({ op: "run", blob }, opts?.quiet);
+        if (!out) throw new GpuFrameError("The WebGPU frame returned no image.", false);
+        return out;
+      },
+      close,
+    };
+
+    window.addEventListener("message", onMessage);
+    document.body.append(frame);
+  });
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * WebGPU self-check
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Thrown by the self-check when the mask came back, but wrong. */
+class WrongResultError extends Error {
+  constructor() {
+    super("WebGPU returned a wrong mask for the self-check picture.");
+    this.name = "WrongResultError";
+  }
+}
+
+/** The self-check picture's edge. Small, so the check costs one quick run; the model resizes anyway. */
+const SELF_CHECK_SIZE = 256;
+
+/**
+ * The picture scripts/e2e.mjs `makeTestPng` draws (a shaded ball on a dark wall, lit from the
+ * upper left, with a ground shadow), scaled from its 800x600 space into the square. A plain
+ * disc on a flat ground leaves the model unsure; a lit sphere is cut cleanly on every engine.
+ */
+async function drawSelfCheckImage(): Promise<Blob> {
+  const size = SELF_CHECK_SIZE;
+  const { canvas, ctx } = makeSurface(size, size);
+  const s = size / 600;
+  ctx.translate((size - 800 * s) / 2, 0);
+  ctx.scale(s, s);
+  const wall = ctx.createLinearGradient(0, 0, 0, 600);
+  wall.addColorStop(0, "#343a42");
+  wall.addColorStop(1, "#22262c");
+  ctx.fillStyle = wall;
+  ctx.fillRect(-200, 0, 1200, 600);
+  ctx.save();
+  ctx.translate(410, 550);
+  ctx.scale(1, 0.18);
+  const shadow = ctx.createRadialGradient(0, 0, 0, 0, 0, 216);
+  shadow.addColorStop(0, "rgba(0,0,0,.45)");
+  shadow.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = shadow;
+  ctx.beginPath();
+  ctx.arc(0, 0, 216, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  const ball = ctx.createRadialGradient(328, 204, 0, 328, 204, 384);
+  ball.addColorStop(0, "#ffb86b");
+  ball.addColorStop(0.5, "#c2410c");
+  ball.addColorStop(1, "#4a1506");
+  ctx.fillStyle = ball;
+  ctx.beginPath();
+  ctx.arc(400, 300, 240, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.55)";
+  ctx.beginPath();
+  ctx.ellipse(340, 230, 45, 30, 0, 0, Math.PI * 2);
+  ctx.fill();
+  return toPng(canvas);
+}
+
+/** Decodes a PNG to straight RGBA bytes. */
+async function readRgba(blob: Blob): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const { width, height } = bitmap;
+    const { ctx } = makeSurface(width, height);
+    ctx.drawImage(bitmap, 0, 0);
+    return { data: ctx.getImageData(0, 0, width, height).data, width, height };
+  } finally {
+    bitmap.close();
+  }
+}
+
+let selfCheck: Promise<void> | undefined;
+
+/**
+ * Opens the frame, has it fetch and warm the model, runs the synthetic picture through it and
+ * judges the mask, once per session, on the WebGPU path only. The result is cached: the
+ * preload and the first job await the same run. A wrong mask, or anything else the frame
+ * throws, is remembered as a WebGPU failure with its reason and the rejection makes the
+ * caller fall back exactly like a thrown run. Network trouble is the exception: it is thrown
+ * as it is, nothing is remembered, and the next call checks again.
+ */
+function verifyGpuOnce(): Promise<void> {
+  if (!selfCheck) {
+    selfCheck = (async () => {
+      const frame = await gpuFrame();
+      await frame.preload();
+      const picture = await drawSelfCheckImage();
+      const out = await frame.run(picture, { quiet: true });
+      const { data, width, height } = await readRgba(out);
+      if (!maskLooksSane(data, width, height)) throw new WrongResultError();
+    })().catch((error: unknown) => {
+      if (isTransferError(error)) {
+        selfCheck = undefined;
+        throw error;
+      }
+      rememberGpuFailure(error instanceof WrongResultError ? "wrong-result" : "error");
+      throw error;
+    });
+    // Nobody may be listening yet (a caller that aborted); the rejection reaches the next one anyway.
+    selfCheck.catch(() => {});
+  }
+  return selfCheck;
 }
 
 /* ------------------------------------------------------------------------------------------------
